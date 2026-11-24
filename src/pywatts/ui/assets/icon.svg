@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>pyWatts</title>
+  <defs>
+    <!-- Zone colors 2-5 from theme.py, low power to high -->
+    <linearGradient id="zones" gradientUnits="userSpaceOnUse" x1="0" y1="200" x2="0" y2="48">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="0.36" stop-color="#2fa65a"/>
+      <stop offset="0.68" stop-color="#f08c1a"/>
+      <stop offset="1" stop-color="#e5484d"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#12151a"/>
+  <rect x="11" y="11" width="234" height="234" rx="51" fill="none" stroke="#3b4350" stroke-width="6"/>
+  <path d="M46 92 L88 188 L126 110 L164 188 L210 60" fill="none" stroke="url(#zones)"
+        stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
