@@ -68,6 +68,14 @@ QLabel[role="error"] {{
 /* navigation */
 QFrame#nav {{ background: {NAV}; border: none; border-right: 1px solid {BORDER}; }}
 QLabel#brand {{ font-size: 18px; font-weight: 700; padding: 4px 8px 14px 8px; }}
+QToolButton#rider {{
+    background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 8px;
+    padding: 7px 18px 7px 10px; margin-bottom: 10px; text-align: left;
+}}
+QToolButton#rider:hover {{ border-color: {BORDER_STRONG}; }}
+QToolButton#rider::menu-indicator {{
+    subcontrol-origin: padding; subcontrol-position: center right; right: 6px;
+}}
 QListWidget#sidebar {{ background: transparent; border: none; padding: 0; }}
 QListWidget#sidebar::item {{
     color: {MUTED}; border-radius: 8px; padding: 9px 10px; margin: 1px 0;

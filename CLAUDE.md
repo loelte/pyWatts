@@ -2,7 +2,7 @@
 
 Python >=3.11, PyQt6, pyqtgraph, bleak, platformdirs, sqlite3, fit-tool, pytest(-qt), ruff.
 The owner does not want git for now: no init, no commits. Never put their email or name into files or requests.
-Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, progress, Strava upload, ride import (files; Wahoo planned), training plan with AI coach. No video, other cloud, ANT+, multi-user.
+Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, progress, Strava upload, ride import (files; Wahoo planned), training plan with AI coach. No video, other cloud, ANT+. Riders on one device: own data, shared library that everyone may edit, no passwords.
 
 ## Commands (venv in .venv; POSIX: .venv/bin/python)
 - `.venv\Scripts\python -m pip install -e .[dev]`
@@ -15,11 +15,12 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, pro
   `core/plan.py`: units, status, matching with rides, planned load (pure).
 - `trainer/` base (Protocol), ftms + hr strap (bleak), fake (simulator), thread (TrainerBridge). Only thread.py uses Qt.
 - `storage/` db, repo (+SessionRecorder), profile (rider + zones), fit_export, fit_import, import_files. Imports core only; no Qt.
+  `storage/riders.py`: list, add, remove riders (`<stem>-riders/<id>.db`, table library.riders).
   `storage/plan_repo.py`: plans, units, ride links, undo log; shares Repo's connection.
 - `sync/` strava + oauth + base (httpx, keyring; no Qt), thread (SyncBridge), service (rules, the only Repo user), gui_gc. Imports storage/core, not ui.
 - `ai/` tools (no Qt) + server (QLocalServer) + service (rules) + mcp_stdio (own process: no Qt, no DB); pty + launch (program in the terminal), prompt.
 - `ui/` thin widgets; `ride_controller.py` joins Runner + bridge + recorder.
-- `app.py` wiring/CLI. `platform.py` only OS-specific seam (data dirs).
+- `app.py` wiring/CLI; run_riders: one window per rider, everything is torn down and rebuilt on a switch. `platform.py` only OS-specific seam (data dirs).
 - No pyftms, no qasync: Qt makes the GUI thread STA, which breaks bleak WinRT.
 
 ## Threads
@@ -38,6 +39,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, pro
 - `RidePage(repo, bridge, controller)`: `set_workout(workout)`; `ConnectDialog(repo, bridge)`
 - `SyncPage(service)`; `MainWindow(..., sync=None)` and `HistoryPage(repo, sync=None)` work without sync.
 - `PlanPage(repo, plans, coach_panel=None)`: `ride_requested(Workout, unit_id)`, `workout_requested(UUID)`, `refresh()` (reloads only while shown). `CoachPanel(repo, plans, coach)`: `undone`, `shutdown()`.
+- `MainWindow(..., riders=None)`: `ui/riders.RiderButton`; `switch_rider` closes the window, app.py reads `next_rider`. Never during a ride.
 - `MainWindow(..., coach=None)`: no terminal without it. Unit colors: theme.PLAN_COLORS, states in ui/widgets/calendar_model.py.
 - `HistoryPage`: `refresh()`; `ui/widgets/profile_plot.ProfilePlot`: set_profile/set_cursor/set_trace
 
@@ -46,25 +48,27 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, pro
 - Parsers are pure functions with byte fixtures; timing code takes an injectable clock.
 - Five zones (core/zones.py). Tracked values (repo.TRACKED) change only via record_metric/save_profile, so they are logged.
 - samples.segment +1 per pause; peaks (session_peaks) never span segments.
-- Migrations are append-only (db.MIGRATIONS). `backfill_analysis()` at startup analyses rides of older versions.
+- One DB file per rider; `workouts` is in a second file, attached as `library` (db.open_db; default `<stem>-library.db`). Never create a `workouts` table in the rider file: it would hide the library's.
+- Migrations are append-only (db.MIGRATIONS, db.LIBRARY_MIGRATIONS). `backfill_analysis()` at startup analyses rides of older versions.
 - An exception escaping a Qt slot aborts the app: wrap slot work in `_guard`. Dialogs are overridable methods, for tests.
 - A tick gap > 10 s (sleep) auto-pauses and is not credited; trainer loss auto-pauses, strap loss does not. Strap HR beats trainer HR.
 - Sessions snapshot the workout; inserted as `crashed`, updated at finish; flush ~10 s.
 
 ## Sync rules
-- Strava is upload only: its API policy forbids storing data read through it. Secrets only in the OS keychain, never in DB, files or logs.
-- Strava title: `<workout> with pyWatts ⚡` (service.activity_name), imported rides keep their name.
+- Strava is upload only: its API policy forbids storing data read through it. Secrets only in the OS keychain, never in DB, files or logs. One keychain entry per rider (app.strava_account): the default database keeps the original one, every other uses its rider_id.
+- Strava title: `<workout> with pyWatts` (service.activity_name), imported rides keep their name.
 - Imported rides (sessions.source != 'pywatts') are never auto-uploaded. `imports` rows outlive their session: deleted rides stay away.
 - Wahoo: PKCE, https redirect only (so the address is pasted), no rides of third-party apps, sandbox 250 requests/day. Never send the token to the FIT CDN.
 
 ## AI coach rules
-- Writes go only through PlanRepo.apply("ai", ...): one transaction, logged, undoable. The AI must not change workouts of origin 'user' (enforced in PlanRepo; saving in the editor makes a workout the user's). Rides, profile, FTP: read-only.
+- Writes go only through PlanRepo.apply("ai", ...): one transaction, logged, undoable. The AI must not change workouts of origin 'user' (enforced in PlanRepo; saving in the editor makes a workout the user's), nor those the AI made for another rider (workouts.owner = rider_id). Rides, profile, FTP: read-only.
 - No trainer or ride control, SQL, secrets, device addresses or paths in tools. All calls are refused during a ride.
 - Claude Code starts with --strict-mcp-config --restricted --tools "" (verified 2026-11-24 with 2.1.330: only pyWatts tools offered). Never drop a flag to make a start work. Token only in the environment. Consent first, never auto-started.
 - A ridden unit keeps the workout as ridden; others follow the library. Links removed by hand are never matched again.
 
 ## ERG safety (do not regress; tests/trainer/test_ftms_trainer.py)
 - Never leave load on: halt before disconnect and after reconnect if not running; refused halt -> retry -> min target -> error.
+- A switch of riders needs TrainerBridge.shutdown() to return True (BLE thread ended); otherwise the app ends instead.
 - No target writes while paused/stopped; a failed start is retried by the resend loop. bleak WinRT raises CancelledError when Windows aborts an operation: handle with `reraise_own_cancel`. Bridge: disconnect cancels a pending connect by design.
 
 ## FTMS
@@ -77,6 +81,8 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, history, profile, pro
   bit9 HR u8, bit10 MET u8, bit11 elapsed u16, bit12 remaining u16.
 
 ## Status (2026-11-24)
+- Riders: done, tested with the simulated trainer. Not yet tried: a switch with a real trainer, a second Strava account, the coach with a second rider. Deleting a workout leaves other riders' units the copy from when they were planned.
+- The offscreen platform draws list rows too close together (sidebar, picker); the real one does not.
 - First real ride done on Windows: 90 min ERG on a KICKR CORE 2 with a Wahoo TRACKR HR strap, no pauses, auto-finished, uploaded to Strava.
 - Not yet seen on hardware: pause/resume, reconnect, sprint. Linux and macOS untested.
 - Planned: interactive progress plots + plot export. Data is in session_peaks, sessions (np, load, weight_kg), body_metrics.

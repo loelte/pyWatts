@@ -154,7 +154,7 @@ def test_start_stop_restart(make, coach, repo, tmp_path):
     argv, cwd, env, rows, cols = panel._bridge.starts[0]
     assert argv[0] == str(Path(sys.executable).absolute())
     assert "--restricted" in argv and argv[-1] == "be a coach"
-    assert cwd == tmp_path / "coach" and cwd.is_dir()
+    assert cwd == tmp_path / "coach" / repo.rider_id and cwd.is_dir()
     assert env == {"PYW_TOKEN": "t"}
     assert (rows, cols) == panel.terminal.grid() and 20 < cols < 60
     assert panel.terminal.isVisible()

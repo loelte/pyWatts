@@ -1,15 +1,16 @@
-"""Settings page: units, navigation bar, ride layout, default trainer (stored at once)."""
+"""Settings page: one scrolling column of sections. Changes are stored at once."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShowEvent
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShowEvent, QWheelEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QKeySequenceEdit,
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +27,8 @@ from PyQt6.QtWidgets import (
 from pywatts.storage.repo import (
     COACH_COMMAND,
     COACH_PATH,
+    HR_ADDR,
+    HR_NAME,
     NAV_HIDDEN,
     RIDE_KEYS,
     RIDE_TILES,
@@ -48,8 +52,50 @@ COACH_COMMAND_TIP = (
     "Command line of an AI program that supports MCP. {mcp_config} is replaced by the "
     "path of the server configuration, {prompt} by the coach instructions."
 )
+# caption, address setting, name setting
+DEFAULT_DEVICES = (
+    ("Trainer", TRAINER_ADDR, TRAINER_NAME),
+    ("Heart rate strap", HR_ADDR, HR_NAME),
+)
+FIELD_WIDTH = 260
+DEVICE_ROWS = 3
+LIST_FRAME = 10  # border and padding of a list, see theme.py
 SCAN_S = 5.0
 SCAN_GUARD_MS = 20_000  # scan neither finished nor failed
+
+
+class _ComboBox(QComboBox):
+    """Scrolling the page over it must not change the (immediately stored) value."""
+
+    def wheelEvent(self, event: QWheelEvent | None) -> None:
+        if event is not None:
+            event.ignore()
+
+
+class _FullList(QListWidget):
+    """As high as its rows, so that only the page scrolls."""
+
+    def __init__(self, min_rows: int) -> None:
+        super().__init__()
+        self._min_rows = min_rows
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        model = self.model()
+        assert model is not None
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(self._fit)  # a bound method: dropped with the widget
+
+    def _fit(self, *_args: object) -> None:
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:
+        # an empty list has no row to measure: 8 px item padding above and below
+        row = max(self.sizeHintForRow(0), self.fontMetrics().height() + 16)
+        height = row * max(self._min_rows, self.count()) + LIST_FRAME
+        return QSize(super().sizeHint().width(), height)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(super().minimumSizeHint().width(), self.sizeHint().height())
 
 
 class SettingsPage(QWidget):
@@ -69,51 +115,90 @@ class SettingsPage(QWidget):
         self.refresh()
 
     def _build(self) -> None:
-        self.units = QComboBox()
+        content = QWidget()
+        sections = QVBoxLayout(content)
+        sections.setContentsMargins(0, 0, 0, 0)
+        sections.setSpacing(GAP)
+        sections.addWidget(self._build_general_group())
+        sections.addWidget(self._build_devices_group())
+        sections.addWidget(self._build_layout_group())
+        sections.addWidget(self._build_keys_group())
+        sections.addWidget(self._build_coach_group())
+        sections.addStretch(1)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll_area.setWidget(content)
+        # below the scroll area: errors of every section must be seen
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.hide()
+
+        layout = QVBoxLayout(self)
+        page_layout(self, layout)
+        layout.addWidget(text_label("title", "Settings"))
+        layout.addWidget(self.scroll_area, 1)
+        layout.addWidget(self.message)
+
+    def _build_general_group(self) -> QGroupBox:
+        self.units = _ComboBox()
+        self.units.setMaximumWidth(FIELD_WIDTH)
         self.units.addItem("Metric (km)", "metric")
         self.units.addItem("Imperial (mi)", "imperial")
         self.units.currentIndexChanged.connect(
             lambda _i: self._store({UNITS: self.units.currentData()})
         )
+        self.nav_visible = QCheckBox("Show the navigation bar (Ctrl+B toggles it)")
+        self.nav_visible.toggled.connect(lambda on: self._store({NAV_HIDDEN: "" if on else "1"}))
+        group = QGroupBox("General")
+        form = QFormLayout(group)
+        form.addRow("Units", self.units)
+        form.addRow("Window", self.nav_visible)
+        return group
 
-        self.trainer = QLabel()
-        self.trainer.setTextFormat(Qt.TextFormat.PlainText)
-        self.forget_button = QPushButton("Forget")
-        self.forget_button.clicked.connect(
-            lambda: self._store({TRAINER_ADDR: "", TRAINER_NAME: ""})
-        )
-        self.scan_button = QPushButton("Scan")
-        self.scan_button.clicked.connect(lambda: self._start_scan())
-        self.devices = QListWidget()
+    def _build_devices_group(self) -> QGroupBox:
+        # by address setting
+        self.default_labels: dict[str, QLabel] = {}
+        self.forget_buttons: dict[str, QPushButton] = {}
+        defaults = QGridLayout()
+        defaults.setColumnStretch(1, 1)
+        defaults.setHorizontalSpacing(GAP)
+        for row, (caption, addr_key, name_key) in enumerate(DEFAULT_DEVICES):
+            label = text_label("")
+            button = QPushButton("Forget")
+            button.setAccessibleName(f"Forget {caption.lower()}")
+            button.clicked.connect(
+                lambda _c, addr_key=addr_key, name_key=name_key: self._store(
+                    {addr_key: "", name_key: ""}
+                )
+            )
+            self.default_labels[addr_key] = label
+            self.forget_buttons[addr_key] = button
+            defaults.addWidget(text_label("muted", caption), row, 0)
+            defaults.addWidget(label, row, 1)
+            defaults.addWidget(button, row, 2)
+        self.devices = _FullList(DEVICE_ROWS)
         self.devices.currentRowChanged.connect(lambda _r: self._update_buttons())
         self.devices.itemDoubleClicked.connect(lambda _i: self._select_device())
+        self.scan_button = QPushButton("Scan for trainers")
+        self.scan_button.clicked.connect(lambda: self._start_scan())
         self.select_button = QPushButton("Use selected")
         self.select_button.clicked.connect(lambda: self._select_device())
-        self.message = QLabel()
-        self.message.setWordWrap(True)
-        self.message.setTextFormat(Qt.TextFormat.PlainText)
-
-        trainer_row = QHBoxLayout()
-        trainer_row.addWidget(self.trainer, 1)
-        trainer_row.addWidget(self.forget_button)
-        general = QGroupBox("General")
-        form = QFormLayout(general)
-        form.addRow("Units", self.units)
-        self.units.setMaximumWidth(260)
         theme.set_role(self.select_button, "primary")
-        trainer = QGroupBox("Default trainer")
+
         scan_row = QHBoxLayout()
         scan_row.addWidget(self.scan_button)
         scan_row.addWidget(self.select_button)
         scan_row.addStretch(1)
-        trainer_layout = QVBoxLayout(trainer)
-        trainer_layout.addLayout(trainer_row)
-        trainer_layout.addWidget(self.devices, 1)
-        trainer_layout.addWidget(self.message)
-        trainer_layout.addLayout(scan_row)
-        self.nav_visible = QCheckBox("Show the navigation bar (Ctrl+B toggles it)")
-        self.nav_visible.toggled.connect(lambda on: self._store({NAV_HIDDEN: "" if on else "1"}))
-        form.addRow("Window", self.nav_visible)
+        group = QGroupBox("Default devices")
+        layout = QVBoxLayout(group)
+        layout.addLayout(defaults)
+        layout.addWidget(self.devices)
+        layout.addLayout(scan_row)
+        return group
+
+    def _build_coach_group(self) -> QGroupBox:
         self.coach_path = QLineEdit()
         self.coach_path.setPlaceholderText("Found automatically")
         self.coach_path.editingFinished.connect(
@@ -125,24 +210,14 @@ class SettingsPage(QWidget):
         self.coach_command.editingFinished.connect(
             lambda: self._store_text(COACH_COMMAND, self.coach_command)
         )
-        form.addRow("Claude Code program", self.coach_path)
-        form.addRow("Other AI program", self.coach_command)
         note = text_label("muted", COACH_NOTE)
         note.setWordWrap(True)
+        group = QGroupBox("AI coach")
+        form = QFormLayout(group)
+        form.addRow("Claude Code program", self.coach_path)
+        form.addRow("Other AI program", self.coach_command)
         form.addRow("", note)
-
-        layout = QVBoxLayout(self)
-        page_layout(self, layout)
-        layout.addWidget(text_label("title", "Settings"))
-        layout.addWidget(general)
-        columns = QHBoxLayout()
-        columns.setSpacing(GAP)
-        left = QVBoxLayout()
-        left.addWidget(self._build_layout_group(), 1)
-        left.addWidget(self._build_keys_group())
-        columns.addLayout(left, 1)
-        columns.addWidget(trainer, 1)
-        layout.addLayout(columns, 1)
+        return group
 
     def _build_keys_group(self) -> QGroupBox:
         group = QGroupBox("Ride shortcuts")
@@ -150,6 +225,7 @@ class SettingsPage(QWidget):
         self.key_edits: dict[str, QKeySequenceEdit] = {}
         for action, (caption, _default) in ACTIONS.items():
             edit = QKeySequenceEdit()
+            edit.setMaximumWidth(FIELD_WIDTH)
             edit.setMaximumSequenceLength(1)
             edit.setClearButtonEnabled(True)
             edit.editingFinished.connect(self._store_keys)
@@ -157,7 +233,8 @@ class SettingsPage(QWidget):
             form.addRow(caption, edit)
         self.reset_keys_button = QPushButton("Reset keys")
         self.reset_keys_button.clicked.connect(lambda: self._store({RIDE_KEYS: ""}))
-        form.addRow(self.reset_keys_button)
+        self.reset_keys_button.setMaximumWidth(FIELD_WIDTH)
+        form.addRow("", self.reset_keys_button)
         return group
 
     def _store_keys(self) -> None:
@@ -168,8 +245,8 @@ class SettingsPage(QWidget):
         self._store({RIDE_KEYS: serialize_keys(keys)})
 
     def _build_layout_group(self) -> QGroupBox:
-        self.shown_list = QListWidget()
-        self.available_list = QListWidget()
+        self.shown_list = _FullList(len(TILES))
+        self.available_list = _FullList(len(TILES))
         self.shown_list.currentRowChanged.connect(lambda _r: self._update_layout_buttons())
         self.available_list.currentRowChanged.connect(lambda _r: self._update_layout_buttons())
         self.remove_tile_button = QPushButton("Remove >")
@@ -196,10 +273,10 @@ class SettingsPage(QWidget):
         lists = QHBoxLayout()
         shown = QVBoxLayout()
         shown.addWidget(text_label("muted", "Shown, in order"))
-        shown.addWidget(self.shown_list, 1)
+        shown.addWidget(self.shown_list)
         available = QVBoxLayout()
         available.addWidget(text_label("muted", "Available"))
-        available.addWidget(self.available_list, 1)
+        available.addWidget(self.available_list)
         lists.addLayout(shown, 1)
         lists.addLayout(buttons)
         lists.addLayout(available, 1)
@@ -210,7 +287,7 @@ class SettingsPage(QWidget):
                 "muted", f"The first {COLUMNS} data panels are shown large, the rest smaller."
             )
         )
-        outer.addLayout(lists, 1)
+        outer.addLayout(lists)
         return group
 
     # --- ride layout ------------------------------------------------------------------------
@@ -286,7 +363,7 @@ class SettingsPage(QWidget):
     # --- settings ---------------------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Re-read stored values (the connect dialog may have changed the trainer)."""
+        """Re-read stored values (the connect dialogs may have changed the devices)."""
         self._guard(self._load)
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -308,9 +385,12 @@ class SettingsPage(QWidget):
             edit.blockSignals(True)
             edit.setKeySequence(QKeySequence(key))
             edit.blockSignals(False)
-        addr, name = self._repo.get_setting(TRAINER_ADDR), self._repo.get_setting(TRAINER_NAME)
-        self.trainer.setText(f"{name or 'Unnamed'} ({addr})" if addr else "None")
-        self.forget_button.setEnabled(bool(addr))
+        for _caption, addr_key, name_key in DEFAULT_DEVICES:
+            addr, name = self._repo.get_setting(addr_key), self._repo.get_setting(name_key)
+            self.default_labels[addr_key].setText(
+                f"{name or 'Unnamed'} ({addr})" if addr else "None"
+            )
+            self.forget_buttons[addr_key].setEnabled(bool(addr))
         self._update_buttons()
 
     def _store(self, values: dict[str, str]) -> bool:
@@ -318,21 +398,25 @@ class SettingsPage(QWidget):
             for key, value in values.items():
                 self._repo.set_setting(key, value)
 
-        self.message.clear()
+        self._say("")
         ok = self._guard(write)
         error = self.message.text()
         self.refresh()  # on failure the widgets must show what is stored
         if not ok:
-            self.message.setText(error)
+            self._say(error)
         self.settings_changed.emit()  # even after a failure: part may have been written
         return ok
+
+    def _say(self, text: str) -> None:
+        self.message.setText(text)
+        self.message.setVisible(bool(text))
 
     def _guard(self, action: Callable[[], None]) -> bool:
         """Never let a failure escape a slot: PyQt6 would abort the app."""
         try:
             action()
         except Exception as e:
-            self.message.setText(f"{type(e).__name__}: {e}")
+            self._say(f"{type(e).__name__}: {e}")
             return False
         return True
 
@@ -342,13 +426,16 @@ class SettingsPage(QWidget):
         if self._scanning:
             return
         self.devices.clear()
-        self.message.setText("Scanning…")
+        self._say("Scanning…")
         self._set_scanning(True)
         if not self._guard(lambda: self._bridge.scan(SCAN_S)):
             self._set_scanning(False)
 
     def _set_scanning(self, on: bool) -> None:
         self._scanning = on
+        if on and self.scan_button.hasFocus():
+            # disabling it would pass the focus on and scroll to wherever it lands
+            self.devices.setFocus()
         if on:
             self._scan_guard.start()
         else:
@@ -365,20 +452,20 @@ class SettingsPage(QWidget):
             self.devices.addItem(item)
         if devices:
             self.devices.setCurrentRow(0)
-        self.message.setText("" if devices else "No trainer found. Is it awake and in range?")
+        self._say("" if devices else "No trainer found. Is it awake and in range?")
 
     def _on_error(self, text: str) -> None:
         """Errors outside our scan belong to other pages."""
         if self._scanning:
             self._set_scanning(False)
-            self.message.setText(f"Scan failed: {text}")
+            self._say(f"Scan failed: {text}")
 
     def _select_device(self) -> None:
         item = self.devices.currentItem()
         if item is not None:
             name, addr = item.data(ROLE)
             if self._store({TRAINER_ADDR: addr, TRAINER_NAME: name}):
-                self.message.setText(f"Default trainer: {name or addr}")
+                self._say(f"Default trainer: {name or addr}")
 
     def _update_buttons(self) -> None:
         self.scan_button.setEnabled(not self._scanning)

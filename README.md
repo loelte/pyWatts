@@ -2,24 +2,42 @@
 
 Build structured workouts, ride them in ERG mode on an FTMS smart trainer over Bluetooth LE, and keep a local history with `.fit` export, `.fit` import and Strava upload. Developed for Windows 11 + Wahoo KICKR CORE 2.
 
+> **Platform:** pyWatts currently supports **Windows 10/11 only**. A Linux version is planned and will follow soon. Everything runs locally on your machine; there is no account or server.
+
+New here? Follow the **[Quick Setup Guide](QuickSetupGuide.md)** for a step-by-step start.
+
 ## Install and run (Windows)
 
-Requires Python 3.11 or newer.
+1. Download this repository (green **Code** button > **Download ZIP**, then unzip) or clone it.
+2. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/) (tick "Add python.exe to PATH").
+3. In PowerShell, inside the project folder:
 
 ```powershell
 py -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m pip install -e .
 .venv\Scripts\pywatts --fake    # simulated trainer, separate database
 .venv\Scripts\pywatts           # real trainer
 ```
 
+Developers: install with `-e ".[dev]"` to get pytest and ruff.
+
 Options: `--db PATH` (use another database file), `-v` (debug log).
+
+Workouts are in their own file next to the database (`pywatts-library.db`), other riders in the folder `pywatts-riders`. To back up, close pyWatts and copy all of them.
 
 ## First ride
 
 1. Profile: set your FTP, and max heart rate for heart rate colors.
 2. Library: create a workout, or import a `.zwo`, and press Ride.
 3. Ride: Connect, pick the trainer, pedal, Start.
+
+## Several riders
+
+- Click the name at the top of the sidebar to add, switch or remove riders. With two or more, pyWatts asks at startup who is riding.
+- Rides, profile, plan, settings and the Strava login belong to one rider. The workout library is shared and everyone can edit it. There are no passwords.
+- A new rider starts with your trainer and units, and should set their FTP first. The trainer reconnects after a switch.
+- Strava, when several riders share a PC: each rider connects their own Strava account. Before connecting, press **Disconnect** on the Sync page if the previous login is still there, and **log out of strava.com in the browser**, otherwise the browser signs in the previous person's account and the ride would go to the wrong profile. Disconnecting removes only the current rider's login from the keychain.
+- A removed rider's file is kept in `pywatts-riders/removed`; moving it back to `pywatts-riders` brings the rider back.
 
 ## Zones, progress, heart rate strap
 
@@ -31,8 +49,8 @@ Options: `--db PATH` (use another database file), `-v` (debug log).
 
 ## Strava and older rides
 
-- Strava needs a subscription and your own API app: create one at strava.com/settings/api with callback domain `localhost`, then enter its client ID and secret on the Sync page. They and the login are kept in the system keychain (Windows Credential Manager), not in the database.
-- History > Upload to Strava sends one ride. Automatic upload of completed rides is off until you enable it on the Sync page. Strava's default visibility applies. Rides are titled `<workout> with pyWatts ⚡`; imported rides keep their name.
+- Strava needs a subscription and your own API app: create one at strava.com/settings/api with callback domain `localhost`, then enter its client ID and secret on the Sync page. They and the login are kept in the system keychain (Windows Credential Manager), not in the database. Each database (`--db`) has its own login.
+- History > Upload to Strava sends one ride. Automatic upload of completed rides is off until you enable it on the Sync page. Strava's default visibility applies. Rides are titled `<workout> with pyWatts`; imported rides keep their name.
 - Sync > Import rides reads `.fit`, `.fit.gz`, folders and `.zip` archives (cycling only) and skips rides it already knows. Uploads and imports wait while you ride.
 - Zwift files: `%LOCALAPPDATA%\Zwift\Activities` or `Documents\Zwift\Activities`, or download them from zwift.com.
 
@@ -75,10 +93,7 @@ Device addresses in the output identify your hardware; mask them if you post it 
 
 ## Linux / macOS
 
-- Use `.venv/bin/...` instead of `.venv\Scripts\...`.
-- Linux needs BlueZ 5.55+ with a running `bluetooth` service; the user may need to be in the `bluetooth` group. Qt may need `libxcb-cursor0`.
-- macOS: grant the terminal Bluetooth permission. Device addresses are per-machine UUIDs.
-- Neither platform has been tested with a trainer.
+Not supported yet. A Linux version is coming soon; the code is written to be portable, but it has never been tried with a trainer there, and macOS is not planned for now.
 
 ## Development
 

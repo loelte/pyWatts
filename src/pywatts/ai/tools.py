@@ -1211,8 +1211,8 @@ class Tools:
 
     def _refuse_foreign(self, workout: Workout) -> None:
         # PlanRepo refuses too, but only after the new content is valid.
-        if self._plans.workout_origin(workout.id) != "ai":
-            raise ToolError("This workout belongs to the rider: use copy_workout instead.")
+        if not self._plans.ai_may_change(workout.id):
+            raise ToolError("This workout belongs to a rider: use copy_workout instead.")
 
     def _check_undo(self, batch: str) -> set[str]:
         """Tables the undo would touch. Refused if it would alter a ridden unit."""
@@ -1312,7 +1312,7 @@ class Tools:
                 "seconds": _number(total_duration(w)),
                 "load": _number(self._load(w)),
                 "load_without_sprints": sprints or None,
-                "editable": self._plans.workout_origin(w.id) == "ai",
+                "editable": self._plans.ai_may_change(w.id),
             }
         )
 

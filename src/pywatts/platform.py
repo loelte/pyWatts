@@ -27,10 +27,16 @@ def db_path() -> Path:
     return data_dir() / "pywatts.db"
 
 
-def coach_dir() -> Path:
-    """Working directory of the AI program: without project files it could pick up."""
-    path = data_dir() / "coach"
-    path.mkdir(exist_ok=True)
+def lock_path() -> Path:
+    """Held by the only running pyWatts that may use a trainer."""
+    return data_dir() / "pywatts.lock"
+
+
+def coach_dir(rider_id: str) -> Path:
+    """Working directory of the AI program: without project files it could pick up. One per
+    rider, because such programs keep their conversations by directory."""
+    path = data_dir() / "coach" / rider_id
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 

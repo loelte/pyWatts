@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from pywatts.core.plan import Plan, PlanUnit, Ride, match
 from pywatts.core.workout import Workout, from_json, to_json
+from pywatts.storage import db
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ _COLUMNS = {
         "skipped",
         "origin",
     ),
-    "workouts": ("id", "name", "json", "origin"),
+    "workouts": ("id", "name", "json", "origin", "owner"),
 }
 _LINK = "_link"  # extra entry of a deleted unit: [session id, how]
 
@@ -147,6 +148,14 @@ class PlanRepo:
         ).fetchone()
         return None if row is None else row[0]
 
+    def ai_may_change(self, workout_id: UUID) -> bool:
+        """Only what the AI made for this rider."""
+        row = self._stored("workouts", str(workout_id))
+        return row is not None and self._is_own(row)
+
+    def _is_own(self, row: dict[str, Any]) -> bool:
+        return row["origin"] == "ai" and row["owner"] == db.rider_id(self._conn)
+
     def changes(self, limit: int = 50, actor: str | None = None) -> list[Change]:
         """Newest first, one per apply()."""
         rows = self._conn.execute(
@@ -181,7 +190,8 @@ class PlanRepo:
     ) -> str:
         """Save and delete in one transaction; returns the batch for undo().
 
-        The AI must not touch workouts of the user: PlanError, nothing is changed."""
+        The AI must not touch workouts of the user, or those the AI made for other riders:
+        PlanError, nothing is changed."""
         if actor not in ACTORS:
             raise ValueError(f"invalid actor: {actor!r}")
         batch = new_id()
@@ -209,7 +219,10 @@ class PlanRepo:
             for _, table, row_id, before_text, after_text, _ in rows:
                 before = None if before_text is None else json.loads(before_text)
                 after = None if after_text is None else json.loads(after_text)
-                if self._stored(table, row_id) != after:
+                stored = self._stored(table, row_id)
+                if stored is not None and after is not None:
+                    stored = {k: stored[k] for k in after if k in stored}  # older logs lack columns
+                if stored != after:
                     raise PlanError("This was changed again since, so it cannot be undone.")
                 self._put(table, row_id, before)
             self._conn.execute(
@@ -318,8 +331,7 @@ class PlanRepo:
             log.warning("skipping corrupt plan %s", data["id"], exc_info=True)
             return None
 
-    @staticmethod
-    def _row(item: Item, actor: str) -> dict[str, Any]:
+    def _row(self, item: Item, actor: str) -> dict[str, Any]:
         if isinstance(item, Plan):
             values: tuple = (
                 item.id,
@@ -349,7 +361,8 @@ class PlanRepo:
                 item.origin,
             )
         else:
-            values = (str(item.id), item.name, to_json(item), actor)
+            owner = db.rider_id(self._conn) if actor == "ai" else ""
+            values = (str(item.id), item.name, to_json(item), actor, owner)
         return dict(zip(_COLUMNS[_table(item)], values, strict=True))
 
     def _stored(self, table: str, row_id: str) -> dict[str, Any] | None:
@@ -365,10 +378,9 @@ class PlanRepo:
         before = self._stored(table, row_id)
         if before == after:
             return
-        if table == "workouts" and actor == "ai" and before and before["origin"] != "ai":
-            raise PlanError(
-                f"The workout “{before['name']}” belongs to the rider: copy it instead."
-            )
+        if table == "workouts" and actor == "ai" and before and not self._is_own(before):
+            whose = "another rider" if before["origin"] == "ai" else "the rider"
+            raise PlanError(f"The workout “{before['name']}” belongs to {whose}: copy it instead.")
         if table == "plan_units" and before is not None and after is None:
             link = self._conn.execute(
                 "SELECT session_id, how FROM unit_links WHERE unit_id = ?", (row_id,)
@@ -400,6 +412,8 @@ class PlanRepo:
         link = row.pop(_LINK, None)
         if table == "workouts":
             row["updated_at"] = _now()
+            # Logged before there were owners: by this rider.
+            row.setdefault("owner", db.rider_id(self._conn) if row["origin"] == "ai" else "")
         # Never REPLACE: that would delete the row first and cascade to its link.
         updates = ", ".join(f"{c} = excluded.{c}" for c in row if c != "id")
         self._conn.execute(

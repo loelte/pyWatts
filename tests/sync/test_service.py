@@ -140,13 +140,13 @@ def test_button_upload(qtbot, repo, strava, make):
     settle(qtbot)
     assert len(strava.uploads) == 1 and strava.polled == ["5", "5"] and service.errors == []
     name, external = strava.uploads[0]
-    assert name == "W with pyWatts ⚡" and external.startswith("pywatts-")
+    assert name == "W with pyWatts" and external.startswith("pywatts-")
 
 
 def test_activity_name(repo):
     session = repo.get_session(ride(repo))
-    assert activity_name(session) == "W with pyWatts ⚡"
-    assert activity_name(replace(session, workout=Workout(" "))) == "Ride with pyWatts ⚡"
+    assert activity_name(session) == "W with pyWatts"
+    assert activity_name(replace(session, workout=Workout(" "))) == "Ride with pyWatts"
     assert activity_name(replace(session, source="wahoo")) == "W"
 
 

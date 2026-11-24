@@ -27,6 +27,7 @@ from pywatts.ai.service import CoachService
 from pywatts.core.workout import Workout
 from pywatts.storage.plan_repo import PlanRepo
 from pywatts.storage.repo import NAV_HIDDEN, Repo
+from pywatts.storage.riders import Rider
 from pywatts.sync.service import SyncService
 from pywatts.trainer.thread import TrainerBridge
 from pywatts.ui import theme
@@ -38,6 +39,7 @@ from pywatts.ui.profile import ProfilePage
 from pywatts.ui.progress import ProgressPage
 from pywatts.ui.ride import RidePage
 from pywatts.ui.ride_controller import RideController
+from pywatts.ui.riders import RiderButton
 from pywatts.ui.settings import SettingsPage
 from pywatts.ui.sync import SyncPage
 
@@ -55,6 +57,7 @@ class MainWindow(QMainWindow):
         controller: RideController,
         sync: SyncService | None = None,
         coach: CoachService | None = None,
+        riders: RiderButton | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("pyWatts")
@@ -92,6 +95,11 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(12, 18, 12, 12)
         nav_layout.setSpacing(0)
         nav_layout.addWidget(brand)
+        self.riders = riders
+        self.next_rider: Rider | None = None  # who rides once this window is closed
+        self.next_is_new = False
+        if riders is not None:
+            nav_layout.addWidget(riders)
         nav_layout.addWidget(self.sidebar, 1)
         self.stack = QStackedWidget()
         for page in (
@@ -153,6 +161,36 @@ class MainWindow(QMainWindow):
                 activated=lambda row=row: self.sidebar.setCurrentRow(row),
             )
         self._apply_nav()
+        if riders is not None:
+            riders.is_riding = lambda: controller.is_active
+            riders.switch_requested.connect(self.switch_rider)
+            riders.riders_changed.connect(self._show_rider)
+            self.profile.profile_changed.connect(self._rider_changed)
+            self._show_rider()
+
+    def switch_rider(self, rider: Rider, is_new: bool = False) -> None:
+        """Closes the window, with all its questions; app.py opens the next one."""
+        if self.controller.is_active:
+            return
+        self.next_rider, self.next_is_new = rider, is_new
+        if not self.close():
+            self.next_rider = None
+
+    def _rider_changed(self) -> None:
+        if self.riders is not None:
+            self.riders.reload()
+        self._show_rider()
+
+    def _show_rider(self) -> None:
+        name = ""
+        try:
+            if self.riders is not None and self.riders.has_others():
+                name = self.riders.current.name
+        except Exception:  # a slot must not raise
+            log.exception("reading the riders failed")
+        self.setWindowTitle(f"pyWatts – {name}" if name else "pyWatts")
+        if hasattr(self, "sync"):
+            self.sync.set_rider(name)
 
     def _apply_nav(self) -> None:
         try:

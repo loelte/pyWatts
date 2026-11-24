@@ -16,6 +16,7 @@ from pywatts.core.metrics import (
     training_load,
 )
 from pywatts.core.workout import Workout, from_json, to_json
+from pywatts.storage import db
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,10 @@ class Repo:
         """Shared with PlanRepo."""
         return self._conn
 
+    @property
+    def rider_id(self) -> str:
+        return db.rider_id(self._conn)
+
     def list_workouts(self) -> list[Workout]:
         """Sorted by name, case-insensitive."""
         workouts = []
@@ -170,7 +175,7 @@ class Repo:
             self._conn.execute(
                 "INSERT INTO workouts (id, name, json, updated_at) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT (id) DO UPDATE SET name = excluded.name, json = excluded.json, "
-                "updated_at = excluded.updated_at, origin = 'user'",
+                "updated_at = excluded.updated_at, origin = 'user', owner = ''",
                 (str(workout.id), workout.name, to_json(workout), _utc_text(datetime.now(UTC))),
             )
 

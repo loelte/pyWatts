@@ -46,7 +46,8 @@ PLACEHOLDER = (
 CONSENT = (
     "The AI program sends data to its provider: your training rides with power and heart-rate "
     "data, your name, age and weight, and other profile data such as FTP and zones. The "
-    "terms of the provider apply to this data.\n\n"
+    "terms of the provider apply to this data. If several riders use this device, it also sees "
+    "the names and descriptions of all workouts in the library they share.\n\n"
     "Nothing starts by itself: the program only runs after you press Start. What it changes in "
     "your plans and workouts is listed under Changes and can be undone.\n\n"
     "Do you agree?"
@@ -161,7 +162,10 @@ class CoachPanel(QWidget):
             self.stack.setCurrentWidget(self.terminal)
             self.terminal.apply_size()
             self._bridge.start(
-                argv, platform.coach_dir(), dict(prepared.env), *self.terminal.grid()
+                argv,
+                platform.coach_dir(self._repo.rider_id),
+                dict(prepared.env),
+                *self.terminal.grid(),
             )
         except Exception:
             self._show_state("Stopped")

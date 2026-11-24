@@ -1,8 +1,10 @@
 import pytest
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QWheelEvent
+from PyQt6.QtWidgets import QApplication
 
 from pywatts.storage.db import open_db
-from pywatts.storage.repo import TRAINER_ADDR, TRAINER_NAME, UNITS, Repo
+from pywatts.storage.repo import HR_ADDR, HR_NAME, TRAINER_ADDR, TRAINER_NAME, UNITS, Repo
 from pywatts.trainer.base import DeviceInfo
 from pywatts.ui.settings import SettingsPage
 
@@ -45,7 +47,10 @@ def test_units(page, repo, qtbot):
 
 
 def test_scan_select_forget(page, repo, bridge, qtbot):
-    assert page.trainer.text() == "None" and not page.forget_button.isEnabled()
+    assert (
+        page.default_labels[TRAINER_ADDR].text() == "None"
+        and not page.forget_buttons[TRAINER_ADDR].isEnabled()
+    )
     page.scan_button.click()
     assert bridge.scans == 1 and not page.scan_button.isEnabled()
     bridge.scan_finished.emit(DEVICES)
@@ -53,11 +58,14 @@ def test_scan_select_forget(page, repo, bridge, qtbot):
     with qtbot.waitSignal(page.settings_changed):
         page.select_button.click()
     assert repo.get_setting(TRAINER_ADDR) == "BB"
-    assert "strong" in page.trainer.text() and "BB" in page.trainer.text()
+    assert (
+        "strong" in page.default_labels[TRAINER_ADDR].text()
+        and "BB" in page.default_labels[TRAINER_ADDR].text()
+    )
     with qtbot.waitSignal(page.settings_changed):
-        page.forget_button.click()
+        page.forget_buttons[TRAINER_ADDR].click()
     assert repo.get_setting(TRAINER_ADDR) == "" == repo.get_setting(TRAINER_NAME)
-    assert page.trainer.text() == "None"
+    assert page.default_labels[TRAINER_ADDR].text() == "None"
 
 
 def test_unrequested_results_and_errors_ignored(page, bridge):
@@ -102,7 +110,7 @@ def test_store_failure_is_shown(page, repo, monkeypatch):
 def test_show_rereads_trainer(page, repo):
     repo.set_setting(TRAINER_ADDR, "CC")
     page.show()
-    assert "CC" in page.trainer.text()
+    assert "CC" in page.default_labels[TRAINER_ADDR].text()
 
 
 def test_ride_layout_add_remove_arrange(page, repo):
@@ -132,3 +140,80 @@ def test_nav_setting_emits(page, repo):
     assert repo.get_setting(NAV_HIDDEN) == "1"
     page.nav_visible.setChecked(True)
     assert repo.get_setting(NAV_HIDDEN) == ""
+
+
+def test_default_devices_are_listed_and_forgotten_separately(page, repo):
+    for addr_key, name_key, name in ((TRAINER_ADDR, TRAINER_NAME, "T"), (HR_ADDR, HR_NAME, "H")):
+        repo.set_setting(addr_key, f"addr-{name}")
+        repo.set_setting(name_key, name)
+    page.refresh()
+    assert page.default_labels[TRAINER_ADDR].text() == "T (addr-T)"
+    assert page.default_labels[HR_ADDR].text() == "H (addr-H)"
+    page.forget_buttons[HR_ADDR].click()
+    assert repo.get_setting(HR_ADDR) == "" == repo.get_setting(HR_NAME)
+    assert page.default_labels[HR_ADDR].text() == "None"
+    assert not page.forget_buttons[HR_ADDR].isEnabled()
+    assert repo.get_setting(TRAINER_ADDR) == "addr-T"
+
+
+def _wheel(widget):
+    """True if the widget consumed it. Qt hands only real events on to the parents."""
+    pos = QPointF(widget.rect().center())
+    event = QWheelEvent(
+        pos,
+        QPointF(widget.mapToGlobal(pos.toPoint())),
+        QPoint(),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    event.accept()
+    QApplication.sendEvent(widget, event)
+    return event.isAccepted()
+
+
+@pytest.fixture
+def small(page, qtbot):
+    page.resize(800, 400)
+    page.show()
+    qtbot.waitExposed(page)
+    qtbot.waitUntil(lambda: page.scroll_area.verticalScrollBar().maximum() > 0)
+    return page
+
+
+def test_wheel_is_left_to_the_page(small, repo):
+    bar = small.scroll_area.verticalScrollBar()
+    for widget in (small.units, small.devices.viewport(), small.shown_list.viewport()):
+        assert not _wheel(widget)
+    assert _wheel(small.scroll_area.viewport()) and bar.value() > 0
+    assert small.units.currentIndex() == 0 and repo.get_setting(UNITS) == "metric"
+
+
+def test_lists_show_all_rows(small, bridge, qtbot):
+    small.scan_button.click()
+    bridge.scan_finished.emit([DeviceInfo(f"t{i}", f"A{i}", -i) for i in range(12)])
+
+    def fits():
+        for widget in (small.devices, small.shown_list):
+            last = widget.visualItemRect(widget.item(widget.count() - 1))
+            assert last.bottom() <= widget.viewport().height()
+
+    qtbot.waitUntil(fits)
+
+
+def test_scan_does_not_move_the_page(small, qtbot):
+    small.activateWindow()
+    small.scan_button.setFocus()
+    qtbot.waitUntil(small.scan_button.hasFocus)
+    bar = small.scroll_area.verticalScrollBar()
+    before = bar.value()
+    small.scan_button.click()
+    assert bar.value() == before and small.devices.hasFocus()
+
+
+def test_message_is_outside_the_scroll_area(small):
+    assert small.message.isHidden()
+    small.scan_button.click()
+    assert small.message.isVisible() and not small.scroll_area.isAncestorOf(small.message)

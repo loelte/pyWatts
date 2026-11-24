@@ -19,7 +19,7 @@ from pywatts.sync.oauth import browser_login
 API = "https://www.strava.com/api/v3"  # https://api-v3.strava.com from 2027-01-04
 OAUTH = "https://www.strava.com/oauth"
 SCOPE = "activity:write"
-_KEY = "strava"  # one JSON entry: client_id, client_secret, refresh_token
+_KEY = "strava"  # a JSON entry per account: client_id, client_secret, refresh_token
 _EXPIRY_MARGIN_S = 300
 _DUPLICATE = re.compile(r"duplicate of\b.*?\bactivit(?:y|ies)\D{0,3}(\d+)", re.I | re.S)
 
@@ -37,6 +37,13 @@ class UploadStatus:
     error: str | None = None
 
 
+def forget(store: SecretStore, account: str) -> None:
+    """Delete the login of a removed rider, without telling Strava."""
+    if not account:
+        raise ValueError("no account")
+    store.delete(f"{_KEY}-{account}")
+
+
 class StravaClient:
     """Blocking; used by one worker thread."""
 
@@ -46,8 +53,11 @@ class StravaClient:
         http: httpx.Client,
         clock: Callable[[], float] = time.time,
         open_browser: Callable[[str], object] = webbrowser.open,
+        account: str = "",
     ) -> None:
+        """account: keeps the logins of several riders apart."""
         self._store = store
+        self._key = f"{_KEY}-{account}" if account else _KEY
         self._http = http
         self._clock = clock
         self._open_browser = open_browser
@@ -87,7 +97,7 @@ class StravaClient:
         """Forgets the account even if Strava cannot be told."""
         entry = self._load()
         self._access, self._expires_at = "", 0.0
-        self._store.delete(_KEY)
+        self._store.delete(self._key)
         if entry is not None:
             try:
                 self._http.post(
@@ -100,7 +110,7 @@ class StravaClient:
 
     def _load(self) -> dict[str, str] | None:
         try:
-            entry = json.loads(self._store.get(_KEY) or "null")
+            entry = json.loads(self._store.get(self._key) or "null")
             ok = all(entry[k] for k in ("client_id", "client_secret", "refresh_token"))
         except (ValueError, TypeError, KeyError):
             return None
@@ -113,7 +123,7 @@ class StravaClient:
         except (KeyError, TypeError, ValueError) as e:
             raise SyncError("Unexpected answer from Strava.") from e
         # First: the previous refresh token is already invalid.
-        self._store.set(_KEY, json.dumps({**app, "refresh_token": refresh}))
+        self._store.set(self._key, json.dumps({**app, "refresh_token": refresh}))
         self._access, self._expires_at = access, expires_at
 
     def _token(self, data: dict[str, str], redirect: str = "") -> dict[str, Any]:

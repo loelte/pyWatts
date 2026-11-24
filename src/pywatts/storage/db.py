@@ -1,12 +1,21 @@
-"""SQLite connection + schema migrations (PRAGMA user_version). GUI thread only."""
+"""SQLite connection + schema migrations (PRAGMA user_version). GUI thread only.
+
+One file per rider. The workouts are in a second one, attached as `library`, which riders can
+share. No rider file has a table of that name, so a plain `workouts` means the library.
+A transaction over both files is not atomic if the power fails during its commit (WAL)."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
+from uuid import uuid4
 
 # Short: the GUI thread waits on locks.
 BUSY_TIMEOUT_S = 1.0
+
+RIDER_ID = "rider_id"  # settings key
+_RIDER_ID = re.compile(r"[0-9a-f]{32}")  # also a folder name and part of a keychain entry
 
 # Entry i upgrades user_version i -> i+1. Append only; never edit released entries.
 MIGRATIONS: list[tuple[str, ...]] = [
@@ -141,13 +150,52 @@ MIGRATIONS: list[tuple[str, ...]] = [
         )""",
         "CREATE INDEX changes_batch ON changes(batch)",
     ),
+    ("DROP TABLE main.workouts",),  # see _move_workouts
+]
+_MOVE_STEP = 5  # the entry above
+
+# Same rules, for the library. Names must be qualified.
+LIBRARY_MIGRATIONS: list[tuple[str, ...]] = [
+    (
+        """CREATE TABLE library.workouts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            origin TEXT NOT NULL DEFAULT 'user'
+        )""",
+    ),
+    # The rider whose AI made it; '' for workouts of origin 'user'.
+    ("ALTER TABLE library.workouts ADD COLUMN owner TEXT NOT NULL DEFAULT ''",),
+    # file: name within the riders folder, '' = the first rider. See riders.py.
+    (
+        """CREATE TABLE library.riders (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            file TEXT NOT NULL UNIQUE,
+            last_used TEXT NOT NULL
+        )""",
+    ),
 ]
 
 
-def open_db(path: Path | str) -> sqlite3.Connection:
-    """Open/create, WAL, foreign_keys ON, migrate. Newer user_version -> RuntimeError.
+def default_library(path: Path | str) -> Path:
+    path = Path(path)
+    return path.with_name(f"{path.stem}-library.db")
 
-    Tables: workouts(id,name,json,updated_at,origin), sessions(id,workout_id,workout_snapshot_json,
+
+def backup_path(path: Path | str) -> Path:
+    """The rider file as it was before its workouts moved to the library."""
+    path = Path(path)
+    return path.with_name(f"{path.name}.before-library.bak")
+
+
+def open_db(path: Path | str, library: Path | str | None = None) -> sqlite3.Connection:
+    """Open/create, WAL, foreign_keys ON, migrate. Newer user_version -> RuntimeError.
+    library: shared with other riders; default: a file of its own next to `path`.
+
+    Library: workouts(id,name,json,updated_at,origin,owner), riders(id,name,file,last_used).
+    Tables: sessions(id,workout_id,workout_snapshot_json,
     started_at_utc,ended_at_utc,ftp_w,status,avg_power,max_power,avg_hr,duration_s,kj,np,load,
     weight_kg,source), uploads(session_id,state,upload_id,activity_id,error,updated_at),
     imports(source,external_id,sha256,session_id,result,imported_at),
@@ -161,32 +209,92 @@ def open_db(path: Path | str) -> sqlite3.Connection:
     try:
         # Invalid UTF-8 in one row must not make whole queries fail.
         conn.text_factory = lambda raw: raw.decode("utf-8", errors="replace")
-        version = _user_version(conn)
-        if version > len(MIGRATIONS):
-            raise RuntimeError(
-                f"database version {version} is newer than supported ({len(MIGRATIONS)})"
-            )
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("ATTACH ? AS library", (str(library or default_library(path)),))
+        # Both before any change.
+        for schema, migrations in (("main", MIGRATIONS), ("library", LIBRARY_MIGRATIONS)):
+            version = _user_version(conn, schema)
+            if version > len(migrations):
+                raise RuntimeError(
+                    f"{schema} database version {version} is newer than supported "
+                    f"({len(migrations)})"
+                )
+        conn.execute("PRAGMA main.journal_mode = WAL")
+        conn.execute("PRAGMA library.journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
-        _migrate(conn)
+        _migrate(conn, "library", LIBRARY_MIGRATIONS)
+        _migrate(conn, "main", MIGRATIONS[:_MOVE_STEP])
+        if len(MIGRATIONS) > _MOVE_STEP == _user_version(conn):
+            _move_workouts(conn, backup_path(path))
+        _migrate(conn, "main", MIGRATIONS)
+        _claim_workouts(conn)
     except BaseException:
         conn.close()
         raise
     return conn
 
 
-def _user_version(conn: sqlite3.Connection) -> int:
-    return conn.execute("PRAGMA user_version").fetchone()[0]
+def rider_id(conn: sqlite3.Connection) -> str:
+    """Random, made at the first use; tells riders apart who share a library."""
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (RIDER_ID,)).fetchone()
+    if row is not None and _RIDER_ID.fullmatch(row[0]):
+        return row[0]
+    new = uuid4().hex
+    with conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (RIDER_ID, new),
+        )
+    return new
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    for index, statements in enumerate(MIGRATIONS):
-        if _user_version(conn) > index:
+def _claim_workouts(conn: sqlite3.Connection) -> None:
+    """AI workouts from before libraries could be shared: they can only be this rider's."""
+    rider = rider_id(conn)
+    unowned = "origin = 'ai' AND owner = ''"
+    if conn.execute(f"SELECT 1 FROM library.workouts WHERE {unowned} LIMIT 1").fetchone():
+        with conn:
+            conn.execute(f"UPDATE library.workouts SET owner = ? WHERE {unowned}", (rider,))
+
+
+def _user_version(conn: sqlite3.Connection, schema: str = "main") -> int:
+    return conn.execute(f"PRAGMA {schema}.user_version").fetchone()[0]
+
+
+def _migrate(conn: sqlite3.Connection, schema: str, migrations: list[tuple[str, ...]]) -> None:
+    for index, statements in enumerate(migrations):
+        if _user_version(conn, schema) > index:
             continue
         with conn:  # commits, or rolls back schema and version together
             conn.execute("BEGIN IMMEDIATE")
-            if _user_version(conn) > index:  # another process was faster
+            if _user_version(conn, schema) > index:  # another process was faster
                 continue
             for statement in statements:
                 conn.execute(statement)
-            conn.execute(f"PRAGMA user_version = {index + 1}")
+            conn.execute(f"PRAGMA {schema}.user_version = {index + 1}")
+
+
+def _move_workouts(conn: sqlite3.Connection, backup: Path) -> None:
+    """Copy them to the library. Committed before the migration drops the old table, so that
+    a crash in between loses nothing: the next start copies again."""
+    if conn.execute("SELECT 1 FROM main.workouts LIMIT 1").fetchone() is None:
+        return
+    rider = rider_id(conn)
+    if not backup.exists():
+        part = backup.with_name(backup.name + ".part")
+        part.unlink(missing_ok=True)
+        conn.execute("VACUUM main INTO ?", (str(part),))
+        part.replace(backup)
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if _user_version(conn) != _MOVE_STEP:  # another process was faster
+            return
+        conn.execute(
+            "INSERT INTO library.workouts (id, name, json, updated_at, origin, owner) "
+            "SELECT id, name, json, updated_at, origin, "
+            "CASE origin WHEN 'ai' THEN ? ELSE '' END FROM main.workouts WHERE true "
+            "ON CONFLICT (id) DO UPDATE SET name = excluded.name, json = excluded.json, "
+            "updated_at = excluded.updated_at, origin = excluded.origin, "
+            "owner = excluded.owner WHERE excluded.updated_at > updated_at",
+            (rider,),
+        )

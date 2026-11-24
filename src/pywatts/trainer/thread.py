@@ -307,7 +307,8 @@ class TrainerBridge(QObject):
         self._posted.connect(self._dispatch, Qt.ConnectionType.QueuedConnection)
         worker = self._worker = _Worker(factory, self._posted.emit, hr_factory)
         # Deleted without shutdown(): a lambda because it must not be bound to this object.
-        self.destroyed.connect(lambda: worker.close() and None)
+        self._on_destroyed: Callable[[], None] = lambda: worker.close() and None
+        self.destroyed.connect(self._on_destroyed)
 
     @pyqtSlot(str, object)
     def _dispatch(self, kind: str, payload: object) -> None:
@@ -367,13 +368,17 @@ class TrainerBridge(QObject):
     def stop(self) -> None:
         self._worker.submit("stop")
 
-    def shutdown(self, timeout: float = 5.0) -> None:
-        """Stop + disconnect trainer, end loop, join thread. Idempotent."""
+    def shutdown(self, timeout: float = 5.0) -> bool:
+        """Stop + disconnect trainer, end loop, join thread. Idempotent.
+        False: the thread is still busy, so the trainer may not be free yet."""
         if self._shut_down:
-            return
+            return self._worker.join(0)
         self._shut_down = True
+        self.destroyed.disconnect(self._on_destroyed)
         self._worker.close(timeout)
-        if not self._worker.join(timeout):
+        ended = self._worker.join(timeout)
+        if not ended:
             log.warning("BLE thread did not end within %.1f s", timeout)
         self.state = ConnectionState.DISCONNECTED
         self.hr_state = ConnectionState.DISCONNECTED
+        return ended

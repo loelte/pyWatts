@@ -13,7 +13,11 @@ def test_open_creates_schema_and_is_reopenable(tmp_path):
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"workouts", "sessions", "samples", "settings"} <= tables
+    assert {"sessions", "samples", "settings"} <= tables
+    assert "workouts" not in tables  # it would hide the one of the library
+    shared = conn.execute("SELECT name FROM library.sqlite_master WHERE type='table'").fetchall()
+    assert shared == [("workouts",), ("riders",)]
+    assert conn.execute("PRAGMA library.journal_mode").fetchone()[0] == "wal"
     conn.close()
 
 

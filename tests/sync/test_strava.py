@@ -237,3 +237,16 @@ def test_nothing_secret_is_logged(store, server, caplog, capfd):
     out, err = capfd.readouterr()
     for secret in ("ACCESS", "REFRESH", "SECRET", "CODE"):
         assert secret not in caplog.text + out + err
+
+
+def test_riders_have_logins_of_their_own(store, server):
+    http = httpx.Client(transport=httpx.MockTransport(server))
+    other = StravaClient(store, http, clock=lambda: NOW, account="abc")
+    assert make(store, server).connected and not other.connected
+    with pytest.raises(NotConnected):
+        other.upload(b"fit", "name", "id")
+    other.disconnect()
+    assert make(store, server).connected
+    store.set("strava-abc", store.get("strava"))
+    other.disconnect()
+    assert store.get("strava-abc") is None and make(store, server).connected

@@ -30,6 +30,11 @@ IMPORT_NOTE = (
     "values in Progress first."
 )
 
+RIDER_NOTE = (
+    "Imports go into the history of {name}, uploads to the Strava account connected here. Before "
+    "connecting, log out of strava.com in the browser if another rider is logged in there."
+)
+
 
 class SyncPage(QWidget):
     def __init__(self, service: SyncService, parent: QWidget | None = None) -> None:
@@ -106,12 +111,21 @@ class SyncPage(QWidget):
 
         self.message = text_label("muted")
         self.message.setWordWrap(True)
+        self.rider = text_label("muted")
+        self.rider.setWordWrap(True)
+        self.rider.hide()
         layout = QVBoxLayout(self)
         page_layout(self, layout)
         layout.addWidget(text_label("title", "Sync"))
+        layout.addWidget(self.rider)
         layout.addWidget(strava)
         layout.addWidget(self.message)
         layout.addWidget(imports, 1)
+
+    def set_rider(self, name: str) -> None:
+        """Whose account and history this is; "" = there is only one rider."""
+        self.rider.setText(RIDER_NOTE.format(name=name))
+        self.rider.setVisible(bool(name))
 
     # --- Strava ---
 
