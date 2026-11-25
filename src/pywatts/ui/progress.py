@@ -54,7 +54,6 @@ from pywatts.ui.widgets.power_curve import (
 )
 
 RECENT_DAYS = 90
-WEEKS = 26
 # name, unit, lowest, highest, decimals
 METRICS: dict[str, tuple[str, str, int, int, int]] = {
     WEIGHT_KG: ("Weight", "kg", 20, 250, 1),
@@ -93,11 +92,11 @@ def _daily_loads(rides: list[SessionRow], today: date) -> tuple[list[date], list
     return days, [per_day.get(d, 0.0) for d in days]
 
 
-def _weekly(
-    rides: list[SessionRow], today: date, count: int
-) -> tuple[list[date], list[float], list[float]]:
-    """Load and hours of the last `count` weeks (Mondays), ending with the current one."""
+def _weekly(rides: list[SessionRow], today: date) -> tuple[list[date], list[float], list[float]]:
+    """Load and hours per week (Mondays) from the first ride to the current week."""
     this_week = today - timedelta(days=today.weekday())
+    oldest = min((s.started_at_utc.astimezone().date() for s in rides), default=today)
+    count = (this_week - (oldest - timedelta(days=oldest.weekday()))).days // 7 + 1
     weeks = [this_week - timedelta(weeks=i) for i in range(count - 1, -1, -1)]
     load = dict.fromkeys(weeks, 0.0)
     hours = dict.fromkeys(weeks, 0.0)
@@ -281,7 +280,7 @@ class ProgressPage(QWidget):
         self.volume.setText("\n".join(self._volume(rides, now, days) for days in (7, 42)))
         days, loads = _daily_loads(rides, now.astimezone().date())
         self.form.set_series(days, fitness_form(loads))
-        weeks, week_load, week_hours = _weekly(rides, now.astimezone().date(), WEEKS)
+        weeks, week_load, week_hours = _weekly(rides, now.astimezone().date())
         self.weekly.set_weeks(weeks, week_load, week_hours)
         self._entries = self._repo.list_metrics()
         self._load_trend()

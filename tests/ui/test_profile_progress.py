@@ -221,3 +221,115 @@ def test_form_range_and_ride_without_power(progress, repo):
     assert progress.form._values[-1][0] > 0
     progress.form.set_range(30)
     assert progress.form.range_days == 30
+
+
+def test_gaussian_smooth():
+    from pywatts.core.metrics import gaussian_smooth, smooth
+
+    assert gaussian_smooth([], 2) == []
+    assert gaussian_smooth([5.0] * 20, 2) == pytest.approx([5.0] * 20)  # also at the ends
+    out = gaussian_smooth([0.0] * 20 + [100.0] + [0.0] * 20, 2)
+    assert sum(out) == pytest.approx(100) and out[19] == pytest.approx(out[21])
+    assert out[20] == max(out) == pytest.approx(20, abs=0.5)
+
+    # a jump leaves no corner: the slope changes much less than with the plain average
+    def corner(ys):
+        return max(abs(a - 2 * b + c) for a, b, c in zip(ys, ys[1:], ys[2:], strict=False))
+
+    step = [0.0] * 20 + [100.0] * 20
+    assert corner(gaussian_smooth(step, 2)) < 0.5 * corner(smooth(step, 3))
+
+
+def test_weekly_range(qtbot):
+    from datetime import timedelta
+
+    from pywatts.ui.widgets.power_curve import WeeklyPlot
+
+    plot = WeeklyPlot()
+    qtbot.addWidget(plot)
+    plot.set_range(30)  # no data yet
+    weeks = [date(2025, 1, 6) + timedelta(weeks=i) for i in range(60)]
+    plot.set_weeks(weeks, [500.0] + [100.0] * 59, [1.0] * 60)
+
+    def view():
+        (x0, x1), (_y0, y1) = plot.plot.getPlotItem().vb.viewRange()
+        return round((x1 - x0) / 86400 / 7 - 1 / 7), y1
+
+    for days, shown in ((30, 5), (90, 13), (180, 26), (365, 53)):
+        plot.set_range(days)
+        assert view() == (shown, pytest.approx(115))  # the high week is out of sight
+    plot.set_range(None)
+    assert view() == (60, pytest.approx(575))
+    assert "Right click" in plot.summary.text()
+
+
+def test_weekly_reaches_back_to_the_first_ride(progress, repo):
+    from datetime import UTC, datetime, timedelta
+
+    from pywatts.storage.repo import ImportedRide
+
+    start = datetime.now(UTC) - timedelta(weeks=60)
+    samples = [
+        Sample(t=i, power=150, cadence=None, hr=None, target_w=0, speed=28.0) for i in range(600)
+    ]
+    ride = ImportedRide(start, start + timedelta(seconds=600), "Spin", samples)
+    repo.import_session(ride, "file", "x", "sha")
+    progress.refresh()
+    assert progress.message.text() == ""
+    assert len(progress.weekly._weeks) == 61 and progress.weekly._loads[0] > 0
+
+
+def test_trend_range(qtbot):
+    from datetime import timedelta
+
+    from pywatts.ui.widgets.power_curve import TrendPlot
+
+    plot = TrendPlot()
+    qtbot.addWidget(plot)
+    plot.set_range(30)  # no data yet
+    today = date.today()
+    days = [today - timedelta(days=d) for d in (400, 100, 10)]
+    plot.set_series("FTP", "W", days, [200.0, 250.0, 260.0])
+    assert "+0.0 W since" in plot.summary.text()
+    (x0, x1), (y0, _y1) = plot.plot.getPlotItem().vb.viewRange()
+    assert 35 < (x1 - x0) / 86400 < 37.5
+    assert 250 < y0 < 260  # the entry 400 days ago does not stretch the axis
+    plot.set_range(180)
+    assert "+10.0 W since" in plot.summary.text()
+    plot.set_range(None)
+    assert "+60.0 W since" in plot.summary.text()
+    plot.set_series("FTP", "W", days[:2], [200.0, 250.0])
+    plot.set_range(30)
+    assert "nothing logged in this time span" in plot.summary.text()
+    plot.set_range(365)
+    assert "+0.0 W since" in plot.summary.text()
+
+
+def test_right_click_opens_the_range_menu(progress, monkeypatch):
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtWidgets import QMenu
+
+    class Click:
+        def __init__(self, pos):
+            self._pos = pos
+
+        def button(self):
+            return Qt.MouseButton.RightButton
+
+        def scenePos(self):
+            return self._pos
+
+        def screenPos(self):
+            return QPointF(0, 0)
+
+        def accept(self):
+            pass
+
+    def choose(menu, _pos):
+        next(a for a in menu.actions() if a.text() == "1 year").trigger()
+
+    monkeypatch.setattr(QMenu, "exec", choose)
+    for plot in (progress.form, progress.weekly, progress.trend):
+        rect = plot.plot.getPlotItem().vb.sceneBoundingRect()
+        plot.plot.scene().sigMouseClicked.emit(Click(rect.center()))
+        assert plot.range_days == 365

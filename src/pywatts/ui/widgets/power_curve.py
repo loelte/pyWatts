@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QMenu, QPushButton, QVBoxLayout, QWidget
 
-from pywatts.core.metrics import estimated_ftp, smooth
+from pywatts.core.metrics import estimated_ftp, gaussian_smooth
 from pywatts.storage.repo import Peak
 from pywatts.ui import theme
 from pywatts.ui.widgets.common import text_label
@@ -224,46 +224,23 @@ RANGES: tuple[tuple[str, int | None], ...] = (
     ("Everything", None),
 )
 DEFAULT_RANGE_DAYS = 180
-SMOOTH_RADIUS = 3  # days on each side
+SMOOTH_DAYS = 2  # sigma of the Gaussian over the form chart
+RANGE_HINT = "Right click the chart to change the time span."
+DAY_S = 86400
 
 
-class FormPlot(QWidget):
-    """Fitness (long average of the training load), fatigue (short) and form (difference)."""
+class RangePlot(QWidget):
+    """A chart over dates. Right click chooses the time span, which ends today."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, range_days: int | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.range_days = range_days
         self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         _style(self.plot)
         self.plot.setMinimumHeight(220)
-        self.plot.setLabel("left", "load / day")
-        self.plot.addItem(
-            pg.InfiniteLine(angle=0, pen=pg.mkPen(theme.BORDER_STRONG, width=1)), ignoreBounds=True
-        )
-        self._lines = {
-            "fitness": self.plot.plot(pen=pg.mkPen(theme.ACCENT, width=2)),
-            "fatigue": self.plot.plot(pen=pg.mkPen(theme.POWER, width=2)),
-            "form": self.plot.plot(pen=pg.mkPen(theme.OK, width=2)),
-        }
-        self.legend = text_label(
-            "muted", "Blue: fitness (42 days)    Amber: fatigue (7 days)    Green: form"
-        )
-        self._days: list[date] = []
-        self._values: list[tuple[float, float, float]] = []
-        self.range_days: int | None = DEFAULT_RANGE_DAYS
         self.plot.scene().sigMouseClicked.connect(self._on_click)  # type: ignore[union-attr]
         self.summary = text_label("body")
         self.summary.setWordWrap(True)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.legend)
-        layout.addWidget(self.plot, 1)
-        layout.addWidget(self.summary)
-
-    def set_series(self, days: list[date], values: list[tuple[float, float, float]]) -> None:
-        """values: (fitness, fatigue, form) per day, same length as days: the whole history.
-        The shown part is `range_days` long; right click changes it."""
-        self._days, self._values = days, values
-        self._redraw()
 
     def set_range(self, days: int | None) -> None:
         """Days shown ending today; None = everything."""
@@ -289,6 +266,40 @@ class FormPlot(QWidget):
         event.accept()
 
     def _redraw(self) -> None:
+        raise NotImplementedError
+
+
+class FormPlot(RangePlot):
+    """Fitness (long average of the training load), fatigue (short) and form (difference)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(DEFAULT_RANGE_DAYS, parent)
+        self.plot.setLabel("left", "load / day")
+        self.plot.addItem(
+            pg.InfiniteLine(angle=0, pen=pg.mkPen(theme.BORDER_STRONG, width=1)), ignoreBounds=True
+        )
+        self._lines = {
+            "fitness": self.plot.plot(pen=pg.mkPen(theme.ACCENT, width=2)),
+            "fatigue": self.plot.plot(pen=pg.mkPen(theme.POWER, width=2)),
+            "form": self.plot.plot(pen=pg.mkPen(theme.OK, width=2)),
+        }
+        self.legend = text_label(
+            "muted", "Blue: fitness (42 days)    Amber: fatigue (7 days)    Green: form"
+        )
+        self._days: list[date] = []
+        self._values: list[tuple[float, float, float]] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.legend)
+        layout.addWidget(self.plot, 1)
+        layout.addWidget(self.summary)
+
+    def set_series(self, days: list[date], values: list[tuple[float, float, float]]) -> None:
+        """values: (fitness, fatigue, form) per day, same length as days: the whole history."""
+        self._days, self._values = days, values
+        self._redraw()
+
+    def _redraw(self) -> None:
         days, values = self._days, self._values
         if not days:
             for line in self._lines.values():
@@ -296,18 +307,18 @@ class FormPlot(QWidget):
             self.summary.setText("No rides yet.")
             return
         xs = [datetime.combine(d, time(12)).timestamp() for d in days]
-        columns = [smooth([v[i] for v in values], SMOOTH_RADIUS) for i in range(3)]
+        columns = [gaussian_smooth([v[i] for v in values], SMOOTH_DAYS) for i in range(3)]
         for line, column in zip(self._lines.values(), columns, strict=True):
             line.setData(xs, column)
         fitness, fatigue, form = values[-1]  # today's numbers stay unsmoothed
         first = 0 if self.range_days is None else max(0, len(days) - self.range_days)
-        self.plot.setXRange(xs[first], xs[-1] + 86400, padding=0)
+        self.plot.setXRange(xs[first], xs[-1] + DAY_S, padding=0)
         low = min(column[i] for column in columns[2:] for i in range(first, len(days)))
         high = max(column[i] for column in columns[:2] for i in range(first, len(days)))
         self.plot.setYRange(min(low, 0) * 1.1, max(high, 1) * 1.1, padding=0)
         self.summary.setText(
             f"Today: fitness {fitness:.0f}  ·  fatigue {fatigue:.0f}  ·  form {form:+.0f} "
-            f"({form_state(form)})\nRight click the chart to change the time span."
+            f"({form_state(form)})\n{RANGE_HINT}"
         )
 
 
@@ -323,16 +334,16 @@ def form_state(form: float) -> str:
     return "heavy fatigue, risk of overreaching"
 
 
-class WeeklyPlot(QWidget):
+class WeeklyPlot(RangePlot):
     """Training load per week (Monday to Sunday) as bars."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
-        _style(self.plot)
-        self.plot.setMinimumHeight(220)
+        super().__init__(DEFAULT_RANGE_DAYS, parent)
+        self._weeks: list[date] = []
+        self._loads: list[float] = []
+        self._hours: list[float] = []
         self.plot.setLabel("left", "load / week")
-        self._bars = pg.BarGraphItem(x=[], height=[], width=86400 * 5, brush=theme.ACCENT, pen=None)
+        self._bars = pg.BarGraphItem(x=[], height=[], width=DAY_S * 5, brush=theme.ACCENT, pen=None)
         self.plot.addItem(self._bars)
         self._average = pg.InfiniteLine(
             angle=0,
@@ -342,23 +353,29 @@ class WeeklyPlot(QWidget):
         )
         self._average.hide()
         self.plot.addItem(self._average, ignoreBounds=True)
-        self.summary = text_label("body")
-        self.summary.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.summary)
 
     def set_weeks(self, weeks: list[date], loads: list[float], hours: list[float]) -> None:
-        """weeks: Mondays, oldest first; the last one is the current, unfinished week."""
-        xs = [datetime.combine(w, time(12)).timestamp() + 86400 * 2 for w in weeks]
-        self._bars.setOpts(x=xs, height=loads, width=86400 * 5)
+        """weeks: Mondays, oldest first, the whole history; the last one is the current,
+        unfinished week."""
+        self._weeks, self._loads, self._hours = weeks, loads, hours
+        self._redraw()
+
+    def _redraw(self) -> None:
+        weeks, loads, hours = self._weeks, self._loads, self._hours
+        xs = [datetime.combine(w, time(12)).timestamp() + DAY_S * 2 for w in weeks]
+        self._bars.setOpts(x=xs, height=loads, width=DAY_S * 5)
         if not weeks:
             self._average.hide()
             self.summary.setText("No rides yet.")
             return
-        self.plot.setXRange(xs[0] - 86400 * 4, xs[-1] + 86400 * 4, padding=0)
-        self.plot.setYRange(0, max([*loads, 1]) * 1.15, padding=0)
+        count = len(weeks) if self.range_days is None else math.ceil(self.range_days / 7)
+        first = max(0, len(weeks) - count)
+        self.plot.setXRange(xs[first] - DAY_S * 4, xs[-1] + DAY_S * 4, padding=0)
+        self.plot.setYRange(0, max([*loads[first:], 1]) * 1.15, padding=0)
         previous = loads[-5:-1]
         average = sum(previous) / len(previous) if previous else 0.0
         self._average.setValue(average)
@@ -370,17 +387,17 @@ class WeeklyPlot(QWidget):
                 text += (
                     "\nLast week was a big jump over your usual load: ease in if you feel tired."
                 )
-        self.summary.setText(text)
+        self.summary.setText(f"{text}\n{RANGE_HINT}")
 
 
-class TrendPlot(QWidget):
+class TrendPlot(RangePlot):
     """One tracked value (FTP, weight, heart rates) over time, as logged."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
-        _style(self.plot)
-        self.plot.setMinimumHeight(220)
+        super().__init__(None, parent)
+        self._name = self._unit = ""
+        self._days: list[date] = []
+        self._values: list[float] = []
         self._line = self.plot.plot(
             pen=pg.mkPen(theme.ACCENT, width=2),
             symbol="o",
@@ -388,26 +405,43 @@ class TrendPlot(QWidget):
             symbolBrush=theme.ACCENT,
             symbolPen=None,
         )
-        self.summary = text_label("body")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.summary)
 
     def set_series(self, name: str, unit: str, days: list[date], values: list[float]) -> None:
-        """Oldest first."""
+        """Oldest first, the whole history."""
+        self._name, self._unit, self._days, self._values = name, unit, days, values
+        self._redraw()
+
+    def _redraw(self) -> None:
+        name, unit, days, values = self._name, self._unit, self._days, self._values
+        if not name:
+            return
         self.plot.setLabel("left", f"{name} ({unit})")
         xs = [datetime.combine(d, time(12)).timestamp() for d in days]
         self._line.setData(xs, values)
         if not days:
             self.summary.setText(f"No {name.lower()} logged yet.")
             return
-        low, high = min(values), max(values)
+        now = datetime.now().timestamp()
+        start = xs[0]
+        if self.range_days is not None:
+            start = max(start, now - self.range_days * DAY_S)
+        first = next((i for i, x in enumerate(xs) if x >= start), len(xs))
+        visible = values[first:]
+        if 0 < first < len(xs):  # the line enters from an older entry
+            share = (start - xs[first - 1]) / (xs[first] - xs[first - 1])
+            visible = [values[first - 1] + share * (values[first] - values[first - 1]), *visible]
+        low, high = min(visible or values[-1:]), max(visible or values[-1:])
         pad = max((high - low) * 0.2, high * 0.02, 1)
         self.plot.setYRange(low - pad, high + pad, padding=0)
-        span = 86400 * 3
-        self.plot.setXRange(xs[0] - span, max(xs[-1], datetime.now().timestamp()) + span, padding=0)
-        self.summary.setText(
-            f"{values[-1]:g} {unit} on {days[-1]:%Y-%m-%d}  ·  "
-            f"{values[-1] - values[0]:+.1f} {unit} since {days[0]:%Y-%m-%d}"
-        )
+        span = DAY_S * 3
+        self.plot.setXRange(start - span, max(xs[-1], now) + span, padding=0)
+        text = f"{values[-1]:g} {unit} on {days[-1]:%Y-%m-%d}  ·  "
+        if first < len(xs):
+            text += f"{values[-1] - values[first]:+.1f} {unit} since {days[first]:%Y-%m-%d}"
+        else:
+            text += "nothing logged in this time span"
+        self.summary.setText(f"{text}\n{RANGE_HINT}")

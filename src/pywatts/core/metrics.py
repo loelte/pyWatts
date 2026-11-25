@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 _WINDOW = 30
@@ -84,6 +85,23 @@ def smooth(values: Sequence[float], radius: int = 3) -> list[float]:
     for i in range(n):
         lo, hi = max(0, i - radius), min(n, i + radius + 1)
         out.append((total[hi] - total[lo]) / (hi - lo))
+    return out
+
+
+def gaussian_smooth(values: Sequence[float], sigma: float) -> list[float]:
+    """Centered average with bell-shaped weights, sigma in points. Unlike `smooth` a value fades
+    in and out of the window, so a jump leaves no corners. The window shrinks at the ends."""
+    radius = math.ceil(3 * sigma)
+    weights = [math.exp(-0.5 * (k / sigma) ** 2) for k in range(radius + 1)]
+    n = len(values)
+    out = []
+    for i in range(n):
+        total = weight = 0.0
+        for j in range(max(0, i - radius), min(n, i + radius + 1)):
+            w = weights[abs(j - i)]
+            total += w * values[j]
+            weight += w
+        out.append(total / weight)
     return out
 
 
