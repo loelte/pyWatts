@@ -1,8 +1,20 @@
 # pyWatts
 
-Build structured workouts, ride them in ERG mode on an FTMS smart trainer over Bluetooth LE, and keep a local history with `.fit` export, `.fit` import and Strava upload. Developed for Windows 11 + Wahoo KICKR CORE 2.
+pyWatts is a desktop app for structured indoor cycling. It covers the whole way from planning your training to riding it on a smart trainer and seeing what it did for you:
 
-> **Platform:** Windows 10/11. **Ubuntu 24.04 or newer is experimental**: it installs and runs there, but nobody has ridden with a real trainer yet. Everything runs locally on your machine; there is no account or server.
+- **Build workouts** from steady blocks, ramps, sprints and repeats, with power in % of FTP and cadence targets. Import and export Zwift `.zwo` files.
+- **Ride in ERG mode** on any FTMS smart trainer over Bluetooth LE. Pause, skip or extend blocks and adjust the power while riding; sprints switch ERG off. Data fields and keyboard shortcuts are up to you.
+- **Connect sensors**: heart rate strap and power meter (power meters are not yet tried on real hardware). On request the trainer is matched to the power meter.
+- **Keep every ride**: charts of power, heart rate, cadence and speed, best power per ride, `.fit` export. Rides are saved while you ride, so a crash costs at most about the last 10 seconds.
+- **Bring older rides**: import `.fit` files, folders and `.zip` archives, such as a Strava export. **Upload to Strava**, by hand or automatically.
+- **Follow your progress**: power curve, best power from 3 s to 60 min, fitness and form, weekly load, and trends of FTP, weight and heart rate. Charts can be saved as images.
+- **Plan your training** in a year, month or week calendar with indoor and outdoor units, which are matched with the rides you did.
+- **Ask an AI coach** (optional, with Claude Code) that reads your rides, builds plans and workouts, and whose changes can be undone. It cannot control the trainer.
+- **Share one computer**: each rider has their own data and Strava login, the workout library is shared.
+
+There is no pyWatts account and no server: your data stays on your computer, unless you use Strava or the AI coach. No trainer yet? Try everything with the simulated one (`--fake`). pyWatts has no video and no virtual world, and does not support ANT+.
+
+> **Platform:** Windows 10/11, developed on Windows 11 with a Wahoo KICKR CORE 2. **Ubuntu 24.04 or newer is experimental**: it installs and runs there, but nobody has ridden with a real trainer yet. macOS is not supported.
 
 New here? Follow the **[Quick Setup Guide](QuickSetupGuide.md)** for a step-by-step start.
 
@@ -23,14 +35,32 @@ py -m venv .venv
 
 Ubuntu 24.04 or newer; 22.04 has too old a Python.
 
+1. Install the required packages:
+
 ```bash
-sudo apt install python3-venv libxcb-cursor0 libegl1 libxkbcommon-x11-0 bluez
-bash scripts/install_linux.sh    # for your user only; run it again to update
+sudo apt install git python3-venv libxcb-cursor0 libegl1 libxkbcommon-x11-0 bluez
+```
+
+2. Get the project, into a folder where it can stay: pyWatts runs from it.
+
+```bash
+git clone https://github.com/loelte/pyWatts.git ~/pyWatts
+cd ~/pyWatts
+```
+
+Or download it (green **Code** button > **Download ZIP**), unzip it and open a terminal in the folder that contains `pyproject.toml`.
+
+3. Install and start:
+
+```bash
+bash scripts/install_linux.sh    # for your user only, without sudo
 .venv/bin/pywatts --fake         # simulated trainer, separate database
 .venv/bin/pywatts                # real trainer, also in the menu
 ```
 
-`bash scripts/install_linux.sh --uninstall` removes the program and its menu entry and keeps your rides. Use separate copies of the project for Windows and Linux (also for WSL): a `.venv` works on one system only. Strava needs a keychain such as GNOME Keyring, which Ubuntu Desktop has.
+To update, run `git pull` in the project folder (or replace its files with a new download), then `bash scripts/install_linux.sh` again. If you moved the folder, delete `.venv` in it and run the script again.
+
+`bash scripts/install_linux.sh --uninstall` removes the program and its menu entry and keeps your rides; delete the project folder yourself. Use separate copies of the project for Windows and Linux (also for WSL): a `.venv` works on one system only. Strava needs a keychain such as GNOME Keyring, which Ubuntu Desktop has.
 
 ## Options
 
@@ -137,3 +167,7 @@ Not supported and never tried.
 ```
 
 Architecture and conventions: see [CLAUDE.md](CLAUDE.md).
+
+## License
+
+[MIT](LICENSE), © 2026 loelte.

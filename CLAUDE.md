@@ -92,7 +92,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - First real ride done on Windows: 90 min ERG on a KICKR CORE 2 with a Wahoo TRACKR HR strap, no pauses, auto-finished, uploaded to Strava.
 - Not yet seen on hardware: pause/resume, reconnect, sprint, Radio, any power meter, matching.
 - Ubuntu 24.04 (2026-11-25): all tests, GUI (Wayland) and simulated rides pass in WSL, which has no Bluetooth. BlueZ behaviour is read from bleak's source, never seen. Checklist in README; experimental until then. macOS untested.
-- Planned: interactive progress plots + plot export. Data is in session_peaks, sessions (np, load, weight_kg), body_metrics.
+- Progress plots (power curve with hover and W/kg, fitness and form, weekly load, trends) and PNG export: done (ui/widgets/power_curve.py). Data is in session_peaks, sessions (np, load, weight_kg), body_metrics. Estimated loads of rides without power are never stored.
 - Limits: threshold HR, height, sex stored but unused; FIT export has no pauses.
 - Open mode (0x11) never tried on a real trainer; power after a sprint returns to ERG without ramp-in.
 - Sync: Strava upload and Wahoo file import work with real data; Zwift files untested. Wahoo API: run `scripts/wahoo_spike.py` once approved, then build the client.

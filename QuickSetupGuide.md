@@ -1,18 +1,18 @@
 # pyWatts – Quick Setup Guide
 
-pyWatts is an indoor-trainer ERG app: workout editor, ERG rides over Bluetooth (FTMS), heart-rate straps and power meters, history, progress, Strava upload and a training plan.
+pyWatts is an indoor-trainer ERG app: workout editor, ERG rides over Bluetooth (FTMS), heart-rate straps and power meters, history, progress, ride import and Strava upload, a training plan with an optional AI coach, and several riders on one computer.
 
 > pyWatts runs on **Windows**. **Ubuntu 24.04 or newer is experimental**: it has not been tried with a real trainer yet. See the [README](README.md) for the full feature description.
 
 ## 1. What you need
 
 - Windows 10 or 11 (or Ubuntu 24.04+) with Bluetooth (LE) built in or a USB dongle
-- Python 3.11 or newer (from [python.org](https://www.python.org/downloads/); tick "Add python.exe to PATH")
+- Python 3.11 or newer (Windows: from [python.org](https://www.python.org/downloads/); tick "Add python.exe to PATH". Ubuntu 24.04 already has it)
 - A smart trainer that supports FTMS (e.g. Wahoo KICKR) and, optionally, a BLE heart-rate strap and a BLE power meter
 
 ## 2. Install
 
-Download the repository (**Code > Download ZIP**, then unzip) or clone it. Open PowerShell in the project folder:
+**Windows:** Download the repository (**Code > Download ZIP**, then unzip) or clone it. Open PowerShell in the project folder:
 
 ```powershell
 python -m venv .venv
@@ -21,10 +21,12 @@ python -m venv .venv
 
 For development (tests, linting) use `-e .[dev]` instead.
 
-**Ubuntu** (in a separate copy of the project):
+**Ubuntu** (do not reuse a project folder from Windows). pyWatts runs from the project folder, so keep it:
 
 ```bash
-sudo apt install python3-venv libxcb-cursor0 libegl1 libxkbcommon-x11-0 bluez
+sudo apt install git python3-venv libxcb-cursor0 libegl1 libxkbcommon-x11-0 bluez
+git clone https://github.com/loelte/pyWatts.git ~/pyWatts
+cd ~/pyWatts
 bash scripts/install_linux.sh
 ```
 
@@ -41,7 +43,7 @@ This starts the app with a simulated trainer. Use it to look around, build a wor
 ## 4. Start it with your trainer
 
 1. Turn on Bluetooth (Windows: Settings → Bluetooth & devices).
-2. Wake the trainer by pedalling a few turns. Close other apps that hold the connection (Zwift, Wahoo app, phone). A trainer accepts only one connection.
+2. Wake the trainer by pedalling a few turns. Close other apps that may control it (Zwift, Wahoo app, also on phones): only one app can control a trainer.
 3. Start the app:
    ```powershell
    .venv\Scripts\pywatts
