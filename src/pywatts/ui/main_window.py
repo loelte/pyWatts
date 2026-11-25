@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(self.sync)
             self.sidebar.addItem(QListWidgetItem(theme.nav_icon("sync"), "Sync"))
             sync.import_finished.connect(lambda _s: self._rides_changed(None))
+            sync.fetch_finished.connect(lambda _n, _s: self._rides_changed(None))
 
         central = QWidget()
         layout = QHBoxLayout(central)

@@ -49,7 +49,7 @@ def read_files(paths: Iterable[Path]) -> Iterator[FileResult]:
             yield FileResult(path.name, error=f"{type(e).__name__}: {e}")
 
 
-def _read_zip(path: Path) -> Iterator[FileResult]:
+def _read_zip(path: Path | IO[bytes]) -> Iterator[FileResult]:
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
             name = info.filename
@@ -79,8 +79,29 @@ def _read(name: str, stream: IO[bytes]) -> FileResult:
     return read_bytes(name, data)
 
 
+def read_archive(name: str, data: bytes) -> FileResult:
+    """The ride in a zip archive, or in a plain FIT file."""
+    if not data.startswith(b"PK"):
+        return read_bytes(name, data)
+    first: FileResult | None = None
+    try:
+        for result in _read_zip(io.BytesIO(data)):
+            if result.ride is not None:
+                return result
+            first = first or result
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
+        return FileResult(name, error=str(e))
+    return first or FileResult(name, error="there is no FIT file in the archive")
+
+
 def read_bytes(name: str, data: bytes) -> FileResult:
-    from pywatts.storage.fit_import import WAHOO, ZWIFT, NotCycling, parse_fit  # slow to load
+    from pywatts.storage.fit_import import (
+        GARMIN,
+        WAHOO,
+        ZWIFT,
+        NotCycling,
+        parse_fit,
+    )  # slow to load
 
     digest = hashlib.sha256(data).hexdigest()
     try:
@@ -89,7 +110,7 @@ def read_bytes(name: str, data: bytes) -> FileResult:
         return FileResult(name, digest, skipped=True, error=str(e))
     except ValueError as e:
         return FileResult(name, digest, error=str(e))
-    source = {ZWIFT: "zwift", WAHOO: "wahoo"}.get(ride.manufacturer, "file")
+    source = {ZWIFT: "zwift", WAHOO: "wahoo", GARMIN: "garmin"}.get(ride.manufacturer, "file")
     return FileResult(name, digest, ride, source)
 
 

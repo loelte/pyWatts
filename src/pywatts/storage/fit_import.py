@@ -16,6 +16,7 @@ from fit_tool.profile.profile_type import Event, EventType, FileType, Manufactur
 from pywatts.storage.repo import ImportedRide, Sample
 
 ZWIFT = Manufacturer.ZWIFT.value
+GARMIN = Manufacturer.GARMIN.value
 WAHOO = Manufacturer.WAHOO_FITNESS.value
 
 HOLD_S = 10  # longer gaps between records are pauses
@@ -29,7 +30,7 @@ _STOPS = {
     EventType.STOP_DISABLE.value,
     EventType.STOP_DISABLE_ALL.value,
 }
-_TITLES = {ZWIFT: "Zwift ride", WAHOO: "Wahoo ride"}
+_TITLES = {ZWIFT: "Zwift ride", WAHOO: "Wahoo ride", GARMIN: "Garmin ride"}
 
 
 class NotCycling(ValueError):

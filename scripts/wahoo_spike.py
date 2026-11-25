@@ -1,6 +1,6 @@
 """Wahoo account check: log in, list one page of workouts, read one FIT file, refresh the token.
 
-python scripts/wahoo_spike.py [--redirect https://localhost:8723/callback]
+python scripts/wahoo_spike.py [--redirect https://localhost:8723/callback] [--scope "..."]
 
 Uses at most 4 API requests. Stores nothing and never prints tokens or ride contents.
 """
@@ -14,27 +14,31 @@ import hashlib
 import secrets
 import sys
 import webbrowser
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pywatts.storage.import_files import read_bytes
 from pywatts.sync.base import http_client
+from pywatts.sync.wahoo import SCOPE
 
 BASE = "https://api.wahooligan.com"
-SCOPE = "user_read workouts_read offline_data"
 
 
-def login_code(client_id: str, redirect: str, challenge: str) -> str:
+def login_code(client_id: str, redirect: str, challenge: str, scope: str) -> str:
     state = secrets.token_urlsafe(16)
     query = {
         "client_id": client_id,
         "redirect_uri": redirect,
-        "scope": SCOPE,
+        "scope": scope,
         "response_type": "code",
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    webbrowser.open(f"{BASE}/oauth/authorize?{urlencode(query)}")
+    if not scope:
+        del query["scope"]  # those set for the app in the portal
+    print(f"Asking for: {scope or 'what is set in the portal'}")
+    print("If the browser shows an invalid scope, the app lacks one of these in the portal.")
+    webbrowser.open(f"{BASE}/oauth/authorize?{urlencode(query, quote_via=quote)}")
     print("Log in. The page after that cannot be loaded; copy its full address.")
     answer = parse_qs(urlsplit(getpass.getpass("Paste the address (hidden), Enter: ")).query)
     if answer.get("state") != [state]:
@@ -48,12 +52,15 @@ def login_code(client_id: str, redirect: str, challenge: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--redirect", default="https://localhost:8723/callback")
-    redirect = parser.parse_args().redirect
+    parser.add_argument("--scope", default=SCOPE, help="none: what is set in the portal")
+    args = parser.parse_args()
+    redirect = args.redirect
+    scope = "" if args.scope == "none" else args.scope
     client_id = input("Wahoo client ID: ").strip()
     verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(verifier.encode()).digest()
     challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-    code = login_code(client_id, redirect, challenge)
+    code = login_code(client_id, redirect, challenge, scope)
     with http_client() as http:
 
         def token(**data: str) -> dict:
@@ -63,6 +70,8 @@ def main() -> int:
                 sys.exit(f"[FAIL] {data['grant_type']}: HTTP {r.status_code}")
             body = r.json()
             print(f"[OK]   {data['grant_type']}: fields {sorted(body)}")
+            lengths = {k: len(v) for k, v in body.items() if k.endswith("_token")}
+            print(f"       lengths {lengths}, scope {body.get('scope')}")
             return body
 
         def get(path: str, access: str) -> dict:
@@ -79,6 +88,10 @@ def main() -> int:
         full = [w for w in workouts if w.get("workout_summary")]
         print(f"[OK]   {page.get('total')} workouts; {len(full)}/{len(workouts)} with summary")
         if workouts:
+            print(f"       workout fields {sorted(workouts[0])}")
+            links = sum(bool((w["workout_summary"].get("file") or {}).get("url")) for w in full)
+            print(f"       {links} FIT links in the list")
+            print(f"       types {sorted({w.get('workout_type_id') for w in workouts})}")
             chosen = (full or workouts)[0]
             detail = get(f"/v1/workouts/{int(chosen['id'])}", tokens["access_token"])
             summary = detail.get("workout_summary") or {}
@@ -86,6 +99,7 @@ def main() -> int:
             print(f"       summary fields {sorted(summary)}")
             if url:
                 r = http.get(url)  # no token: this is not the API host
+                print(f"       FIT link: https {url.startswith('https://')}, HTTP {r.status_code}")
                 result = read_bytes("wahoo.fit", r.content)
                 samples = len(result.ride.samples) if result.ride else 0
                 print(

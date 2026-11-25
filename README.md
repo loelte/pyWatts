@@ -6,13 +6,13 @@ pyWatts is a desktop app for structured indoor cycling. It covers the whole way 
 - **Ride in ERG mode** on any FTMS smart trainer over Bluetooth LE. Pause, skip or extend blocks and adjust the power while riding; sprints switch ERG off. Data fields and keyboard shortcuts are up to you.
 - **Connect sensors**: heart rate strap and power meter (power meters are not yet tried on real hardware). On request the trainer is matched to the power meter.
 - **Keep every ride**: charts of power, heart rate, cadence and speed, best power per ride, `.fit` export. Rides are saved while you ride, so a crash costs at most about the last 10 seconds.
-- **Bring older rides**: import `.fit` files, folders and `.zip` archives, such as a Strava export. **Upload to Strava**, by hand or automatically.
+- **Bring older rides**: import `.fit` files, folders and `.zip` archives, such as a Strava export. New rides **from Wahoo and Garmin** (Garmin is experimental) come by themselves. **Upload to Strava**, by hand or automatically.
 - **Follow your progress**: power curve, best power from 3 s to 60 min, fitness and form, weekly load, and trends of FTP, weight and heart rate. Charts can be saved as images.
 - **Plan your training** in a year, month or week calendar with indoor and outdoor units, which are matched with the rides you did.
 - **Ask an AI coach** (optional, with Claude Code) that reads your rides, builds plans and workouts, and whose changes can be undone. It cannot control the trainer.
-- **Share one computer**: each rider has their own data and Strava login, the workout library is shared.
+- **Share one computer**: each rider has their own data and logins, the workout library is shared.
 
-There is no pyWatts account and no server: your data stays on your computer, unless you use Strava or the AI coach. No trainer yet? Try everything with the simulated one (`--fake`). pyWatts has no video and no virtual world, and does not support ANT+.
+There is no pyWatts account and no server: your data stays on your computer, unless you use Strava or the AI coach ([privacy](PRIVACY.md)). No trainer yet? Try everything with the simulated one (`--fake`). pyWatts has no video and no virtual world, and does not support ANT+.
 
 > **Platform:** Windows 10/11, developed on Windows 11 with a Wahoo KICKR CORE 2. **Ubuntu 24.04 or newer is experimental**: it installs and runs there, but nobody has ridden with a real trainer yet. macOS is not supported.
 
@@ -79,7 +79,7 @@ Workouts are in their own file next to the database (`pywatts-library.db`), othe
 ## Several riders
 
 - Click the name at the top of the sidebar to add, switch or remove riders. With two or more, pyWatts asks at startup who is riding.
-- Rides, profile, plan, settings and the Strava login belong to one rider. The workout library is shared and everyone can edit it. There are no passwords.
+- Rides, profile, plan, settings and the logins (Strava, Wahoo, Garmin) belong to one rider. The workout library is shared and everyone can edit it. There are no passwords.
 - A new rider starts with your trainer and units, and should set their FTP first. The trainer reconnects after a switch.
 - Strava, when several riders share a PC: each rider connects their own Strava account. Before connecting, press **Disconnect** on the Sync page if the previous login is still there, and **log out of strava.com in the browser**, otherwise the browser signs in the previous person's account and the ride would go to the wrong profile. Disconnecting removes only the current rider's login from the keychain.
 - A removed rider's file is kept in `pywatts-riders/removed`; moving it back to `pywatts-riders` brings the rider back.
@@ -104,8 +104,17 @@ Workouts are in their own file next to the database (`pywatts-library.db`), othe
 - Strava needs a subscription and your own API app: create one at strava.com/settings/api with callback domain `localhost`, then enter its client ID and secret on the Sync page. They and the login are kept in the system keychain (Windows Credential Manager), not in the database. Each database (`--db`) has its own login.
 - History > Upload to Strava sends one ride. Automatic upload of completed rides is off until you enable it on the Sync page. Strava's default visibility applies. Rides are titled `<workout> with pyWatts`; imported rides keep their name.
 - Sync > Import rides reads `.fit`, `.fit.gz`, folders and `.zip` archives (cycling only) and skips rides it already knows. Uploads and imports wait while you ride.
+- Wahoo and Garmin, see below, deliver new rides by themselves.
 - Zwift files: `%LOCALAPPDATA%\Zwift\Activities` or `Documents\Zwift\Activities`, or download them from zwift.com.
 - The best way to import the full history at once is requesting an export of your strava archive on: https://www.strava.com/athlete/download_my_account
+
+## Rides from Wahoo and Garmin
+
+Once connected on the Sync page, pyWatts looks for new cycling activities a few seconds after every start and imports them (the last 90 days after connecting; **Fetch everything** gets all). Rides already in the history are recognised, deleted ones stay away, and nothing is fetched while you ride. Fetched rides are not uploaded to Strava automatically. See [PRIVACY.md](PRIVACY.md).
+
+- **Wahoo** needs an API app of your own that Wahoo approved: create it at [developers.wahooligan.com](https://developers.wahooligan.com) with `Confidential: No`, the redirect `https://localhost:8723/callback` and the scopes `user_read` and `workouts_read` switched on (if one is missing, Wahoo shows "invalid scope" at login), then enter its client ID. After the login the browser shows a page that cannot be loaded: copy its full address into pyWatts. Sandbox apps may send 25 requests in 5 minutes and 250 per day, so many rides arrive in portions. Wahoo does not pass on rides recorded by other apps. Check the account first: `python scripts/wahoo_spike.py`.
+- **Garmin** (experimental, never tried with a real account) needs a personal API key: [create it in Garmin Connect](https://connect.garmin.com/app/settings/personalApiToken), valid for at most a year. Garmin allows it only for tools you run for yourself; never give it to anybody. If you have a Garmin account, please report the output of `python scripts/garmin_spike.py`, which shows no keys and no ride contents.
+- The AI coach does not see rides fetched from Wahoo or Garmin until you allow it for that service on the Sync page. Until then its totals are incomplete, and it is told so.
 
 ## Training plan and AI coach
 

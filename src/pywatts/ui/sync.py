@@ -1,4 +1,4 @@
-"""Sync page: Strava account and ride import. Rules live in sync/service.py."""
+"""Sync page: accounts and ride import. Rules live in sync/service.py."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -22,7 +23,8 @@ from PyQt6.QtWidgets import (
 from pywatts import platform
 from pywatts.sync.service import ImportSummary, SyncService
 from pywatts.ui import theme
-from pywatts.ui.widgets.common import page_layout, text_label
+from pywatts.ui.widgets.common import GAP, page_layout, text_label
+from pywatts.ui.widgets.source_box import GarminBox, WahooBox
 
 IMPORT_NOTE = (
     "Cycling activities from .fit files, folders or .zip archives. Rides already in the history "
@@ -31,9 +33,11 @@ IMPORT_NOTE = (
 )
 
 RIDER_NOTE = (
-    "Imports go into the history of {name}, uploads to the Strava account connected here. Before "
-    "connecting, log out of strava.com in the browser if another rider is logged in there."
+    "Fetched and imported rides go into the history of {name}, uploads to the Strava account "
+    "connected here. Before connecting, log out of strava.com, wahooligan.com or Garmin Connect "
+    "in the browser if another rider is logged in there."
 )
+PRIVACY_URL = "https://github.com/loelte/pyWatts/blob/HEAD/PRIVACY.md"
 
 
 class SyncPage(QWidget):
@@ -114,13 +118,39 @@ class SyncPage(QWidget):
         self.rider = text_label("muted")
         self.rider.setWordWrap(True)
         self.rider.hide()
+        self.wahoo = WahooBox(self._service)
+        self.garmin = GarminBox(self._service)
+        services = QHBoxLayout()
+        services.setSpacing(GAP)
+        for box in (self.wahoo, self.garmin):
+            services.addWidget(box, 1)
+        self.privacy_button = QPushButton("Privacy")
+        self.privacy_button.clicked.connect(
+            lambda: self._guard(lambda: self.wahoo.open_url(PRIVACY_URL))
+        )
+        head = QHBoxLayout()
+        head.addWidget(text_label("title", "Sync"))
+        head.addStretch(1)
+        head.addWidget(self.privacy_button)
+        self.results.setFixedHeight(120)
+        content = QWidget()
+        sections = QVBoxLayout(content)
+        sections.setContentsMargins(0, 0, 0, 0)
+        sections.setSpacing(GAP)
+        sections.addWidget(strava)
+        sections.addLayout(services)
+        sections.addWidget(imports, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(content)
         layout = QVBoxLayout(self)
         page_layout(self, layout)
-        layout.addWidget(text_label("title", "Sync"))
+        layout.addLayout(head)
         layout.addWidget(self.rider)
-        layout.addWidget(strava)
+        layout.addWidget(scroll, 1)
+        # below the scroll area: errors of every section must be seen
         layout.addWidget(self.message)
-        layout.addWidget(imports, 1)
 
     def set_rider(self, name: str) -> None:
         """Whose account and history this is; "" = there is only one rider."""

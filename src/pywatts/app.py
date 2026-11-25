@@ -18,10 +18,12 @@ from pywatts.ai.service import CoachService
 from pywatts.storage.plan_repo import PlanRepo
 from pywatts.storage.repo import Repo
 from pywatts.storage.riders import Rider, Riders
-from pywatts.sync.base import KeyringStore, http_client
+from pywatts.sync.base import ActivitySource, KeyringStore, forget, http_client
+from pywatts.sync.garmin import GarminClient
 from pywatts.sync.service import SyncService
-from pywatts.sync.strava import StravaClient, forget
+from pywatts.sync.strava import StravaClient
 from pywatts.sync.thread import SyncBridge
+from pywatts.sync.wahoo import WahooClient
 from pywatts.trainer.base import HeartRateMonitor, PowerMeterMonitor, Trainer
 from pywatts.trainer.fake import FakeHrStrap, FakePowerMeter, FakeTrainer
 from pywatts.trainer.radio import Radio
@@ -83,7 +85,18 @@ def _strava_factory(account: str) -> StravaClient:
     return StravaClient(KeyringStore(), http_client(), account=account)
 
 
-def strava_account(db: Path, rider_id: str) -> str:
+def _wahoo_factory(account: str) -> ActivitySource:
+    return WahooClient(KeyringStore(), http_client(), account=account)
+
+
+def _garmin_factory(account: str) -> ActivitySource:
+    return GarminClient(KeyringStore(), http_client(), account=account)
+
+
+SOURCES = {"wahoo": _wahoo_factory, "garmin": _garmin_factory}
+
+
+def sync_account(db: Path, rider_id: str) -> str:
     """Every database has a login of its own: rides must never reach another rider's account.
     The default one has the login from before there were several."""
     return "" if db.resolve() == platform.db_path().resolve() else rider_id
@@ -231,15 +244,19 @@ def run_rider(
     bridge = make_bridge(fake)
     controller = RideController(repo, bridge)
     # Simulated rides must never reach the network.
-    account = strava_account(rider.path, rider.id)
-    sync_bridge = SyncBridge(None if fake else partial(_strava_factory, account))
+    account = sync_account(rider.path, rider.id)
+    sync_bridge = SyncBridge(
+        None if fake else partial(_strava_factory, account),
+        sources={} if fake else {n: partial(f, account) for n, f in SOURCES.items()},
+    )
     sync = SyncService(repo, sync_bridge, controller)
     coach_config = platform.config_dir() / "coach" / rider.id
     coach = CoachService(repo, PlanRepo(conn), controller, coach_config)
 
     def forget_login(other: Rider) -> None:
         if not fake:
-            forget(KeyringStore(), strava_account(other.path, other.id))
+            services = ("strava", *SOURCES)
+            forget(KeyringStore(), services, sync_account(other.path, other.id))
 
     button = RiderButton(riders, repo, rider, forget_login)
     window = MainWindow(repo, bridge, controller, sync, coach, button)

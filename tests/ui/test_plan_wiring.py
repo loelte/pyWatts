@@ -12,6 +12,7 @@ from pywatts.core.workout import Steady, Workout
 from pywatts.storage.db import open_db
 from pywatts.storage.plan_repo import PlanRepo
 from pywatts.storage.repo import COACH_COMMAND, COACH_PATH, ImportedRide, Repo, Sample
+from pywatts.sync.service import Source
 from pywatts.trainer.fake import FakeTrainer
 from pywatts.trainer.thread import TrainerBridge
 from pywatts.ui.main_window import LIBRARY, PLAN, RIDE, MainWindow
@@ -27,8 +28,23 @@ class Sync(QObject):
     import_progress = pyqtSignal(object)
     uploads_changed = pyqtSignal(int)
     connected_changed = pyqtSignal(bool)
+    source_changed = pyqtSignal(str)
+    login_finished = pyqtSignal(str, str)
+    fetch_finished = pyqtSignal(str, object)
     error = pyqtSignal(str)
     connected = auto_upload = importing = False
+
+    def source(self, name):
+        return Source()
+
+    def ride_count(self, name):
+        return 0
+
+    def auto_fetch(self, name):
+        return True
+
+    def shared_with_ai(self, name):
+        return False
 
 
 @pytest.fixture

@@ -91,13 +91,13 @@ def day(offset=0):
     return (TODAY + timedelta(days=offset)).isoformat()
 
 
-def ride(repo, offset=0, seconds=600, hour=12, title="R", power=200):
+def ride(repo, offset=0, seconds=600, hour=12, title="R", power=200, source="file"):
     d = TODAY + timedelta(days=offset)
     start = datetime(d.year, d.month, d.day, hour).astimezone()
     samples = [Sample(float(t), power, 90.0, 140, 0, None) for t in range(seconds)]
     found = ImportedRide(start, start + timedelta(seconds=seconds), title, samples)
     key = str(uuid4())
-    return repo.import_session(found, "file", key, key).session_id
+    return repo.import_session(found, source, key, key).session_id
 
 
 def user_workout(repo, name="Mine", segments=None):
@@ -740,3 +740,63 @@ def test_failure_after_validation_changes_nothing(tools, plans, repo, monkeypatc
     with pytest.raises(ToolError):
         tools.call("add_units", {"units": [unit(segments=SEGMENTS)]})
     assert repo.list_workouts() == [] and plans.changes() == [] and not tools.changed
+
+
+# --- rides of services ---
+
+
+@pytest.mark.parametrize("service", ["wahoo", "garmin"])
+def test_rides_of_services_are_hidden_without_consent(repo, plans, call, refused, service):
+    own = ride(repo, -2, title="Own")
+    hidden = ride(repo, -1, seconds=3600, title="SECRETRIDE", power=399, source=service)
+    planned = add(call, unit(-1, target_s=3600), unit(-2, target_s=600), unit(-2))["units"]
+    plans.link(planned[0]["unit_id"], hidden)
+    plans.link(planned[1]["unit_id"], own)
+
+    def everything():
+        return {
+            "list_rides": call("list_rides"),
+            "get_progress": call("get_progress"),
+            "get_calendar": call("get_calendar", **{"from": day(-7), "to": day(7)}),
+            "check_progress": call("check_progress"),
+        }
+
+    before = everything()
+    text = json.dumps(before)
+    for part in ("SECRETRIDE", "399", f'"ride_id": {hidden}'):
+        assert part not in text
+    assert all("not_shared" in found for found in before.values())
+    assert "no such ride" in refused("get_ride", {"ride_id": hidden})
+    assert [r["id"] for r in before["list_rides"]["rides"]] == [own]
+    assert before["list_rides"]["total"] == 1
+    states = {u["id"]: u for u in before["get_calendar"]["units"]}
+    first = states[planned[0]["unit_id"]]
+    assert (
+        first["status"] == "unknown" and "ride" not in first and "compliance_percent" not in first
+    )
+    assert states[planned[1]["unit_id"]]["status"] == "done"
+    week = [w for w in before["check_progress"]["weeks"] if w["units"]["total"]][-1]
+    assert week["units"]["unknown"] == 1 and week["done"]["rides"] == 1
+    assert [m["id"] for m in week["missed_units"]] == [planned[2]["unit_id"]]
+    assert week["planned"]["seconds"] == 600
+
+    repo.set_setting(r.service_key(service, "ai"), "1")  # works at once, in both directions
+    after = everything()
+    assert "SECRETRIDE" in json.dumps(after) and "399" in json.dumps(after)
+    assert not any("not_shared" in found for found in after.values())
+    assert call("get_ride", ride_id=hidden)["title"] == "SECRETRIDE"
+    repo.set_setting(r.service_key(service, "ai"), "")
+    assert everything() == before
+
+
+def test_rides_from_files_of_services_are_visible(repo, call):
+    start = datetime(2026, 3, 10, 12).astimezone()
+    found = ImportedRide(
+        start,
+        start + timedelta(seconds=60),
+        "R",
+        [Sample(float(t), 1, None, None, 0, None) for t in range(60)],
+    )
+    repo.import_session(found, "wahoo", "sha256:abc", "abc")
+    rides = call("list_rides")
+    assert rides["total"] == 1 and "not_shared" not in rides

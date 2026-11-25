@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -7,7 +8,8 @@ from pywatts.core.workout import Workout
 from pywatts.storage.db import open_db
 from pywatts.storage.fit_export import fit_bytes
 from pywatts.storage.repo import ImportedRide, Repo, Sample, Upload
-from pywatts.sync.base import SyncError
+from pywatts.sync import service as service_module
+from pywatts.sync.base import NotConnected, Page, RemoteRide, SyncError
 from pywatts.sync.service import ImportSummary, SyncService
 from pywatts.sync.strava import UploadStatus
 from pywatts.sync.thread import SyncBridge
@@ -202,3 +204,194 @@ def test_main_window(qtbot, repo, service):
     assert window.history.table.rowCount() == 1
     controller.shutdown()
     bridge.shutdown()
+
+
+# --- services ---
+
+
+class FakeSource:
+    connected = False
+    failure = None
+    rides = ()
+
+    def begin_login(self, client_id, redirect):
+        if client_id == "bad":
+            raise SyncError("no browser")
+
+    def finish_login(self, address):
+        if address != "good":
+            raise SyncError("wrong address")
+        self.connected = True
+
+    def connect(self, key):
+        if key != "good":
+            raise NotConnected("refused")
+        self.connected = True
+
+    def disconnect(self):
+        self.connected = False
+
+    def page(self, number, since):
+        if self.failure:
+            raise self.failure
+        return Page(list(self.rides), False)
+
+    def download(self, ride):
+        return self.data
+
+
+@pytest.fixture
+def source(monkeypatch):
+    monkeypatch.setattr(service_module, "START_MS", 0)
+    return FakeSource()
+
+
+@pytest.fixture
+def services(repo, source, qtbot):
+    bridge = SyncBridge(None, sources={"wahoo": lambda: source, "garmin": lambda: source})
+    s = SyncService(repo, bridge, FakeRides())
+    p = SyncPage(s)
+    qtbot.addWidget(p)
+    for box in (p.wahoo, p.garmin):
+        box.ask_delete, box.ask_ai = lambda n: None, lambda: False
+    yield s, p
+    bridge.shutdown()
+
+
+def begin(qtbot, box):
+    box.client_id.setText("ID")
+    box.connect_button.click()
+    qtbot.waitUntil(lambda: box.connect_button.text() == "Finish login")
+
+
+def finish(qtbot, box, address="good"):
+    box.address.setText(address)
+    box.connect_button.click()
+    qtbot.waitUntil(lambda: not box._busy)
+
+
+def test_wahoo_login(qtbot, services, source):
+    service, page = services
+    box = page.wahoo
+    page.show()
+    assert not box.connect_button.isEnabled() and not box.check_button.isEnabled()
+    assert not box.address.isVisible() and not box.disconnect_button.isEnabled()
+    box.client_id.setText("bad")
+    box.connect_button.click()
+    qtbot.waitUntil(lambda: box.message.text() == "no browser")
+    assert box.connect_button.text() == "Connect"
+    begin(qtbot, box)
+    assert box.address.isVisible() and not box.connect_button.isEnabled()
+    finish(qtbot, box, "other")
+    assert box.message.text() == "wrong address" and box.address.text() == ""
+    assert box.status.text() == "Not connected" and box.address.isVisible()
+    finish(qtbot, box)
+    assert box.status.text() == "Connected" and box.message.text() == ""
+    assert not box.address.isVisible() and box.connect_button.text() == "Connect"
+    qtbot.waitUntil(lambda: "0 new" in box.result.text())
+    box.disconnect_button.click()
+    qtbot.waitUntil(lambda: box.status.text() == "Not connected")
+    assert box.connect_button.text() == "Connect" and box.result.text() == ""
+
+
+def test_wahoo_login_cancelled(qtbot, services):
+    box = services[1].wahoo
+    begin(qtbot, box)
+    box.address.setText("x")
+    box.cancel_button.click()
+    assert box.connect_button.text() == "Connect" and box.address.text() == ""
+
+
+def test_garmin_login(qtbot, services):
+    box = services[1].garmin
+    urls = []
+    box.open_url = urls.append
+    box.key_button.click()
+    assert urls and urls[0].startswith("https://connect.garmin.com/")
+    box.key.setText("bad")
+    box.connect_button.click()
+    qtbot.waitUntil(lambda: box.message.text() == "refused")
+    assert box.key.text() == "bad" and box.status.text() == "Not connected"
+    box.key.setText("good")
+    box.connect_button.click()
+    qtbot.waitUntil(lambda: box.status.text() == "Connected")
+    qtbot.waitUntil(lambda: box.key.text() == "" and box.message.text() == "")
+
+
+def test_sharing_with_the_ai_needs_consent(services):
+    service, page = services
+    for box, name in ((page.wahoo, "wahoo"), (page.garmin, "garmin")):
+        box.ai.click()
+        assert not box.ai.isChecked() and not service.shared_with_ai(name)
+        box.ask_ai = lambda: True
+        box.ai.click()
+        assert box.ai.isChecked() and service.shared_with_ai(name)
+        box.ask_ai = lambda: pytest.fail("no question")
+        box.ai.click()
+        assert not box.ai.isChecked() and not service.shared_with_ai(name)
+
+
+def test_auto_fetch_switch(services):
+    service, page = services
+    assert page.wahoo.auto.isChecked() and service.auto_fetch("wahoo")
+    page.wahoo.auto.click()
+    assert not service.auto_fetch("wahoo") and service.auto_fetch("garmin")
+
+
+def test_fetch_and_disconnect(qtbot, repo, services, source):
+    service, page = services
+    box = page.wahoo
+    sid = add(repo)
+    source.data = fit_bytes(repo.get_session(sid), repo.get_samples(sid))
+    repo.delete_session(sid)
+    source.rides = [RemoteRide("1", datetime.now(UTC), "Evening", True)]
+    history = HistoryPage(repo)
+    qtbot.addWidget(history)
+    begin(qtbot, box)
+    finish(qtbot, box)
+    qtbot.waitUntil(lambda: "1 new" in box.result.text() and box.check_button.isEnabled())
+    history.refresh()
+    history.table.selectRow(0)
+    assert "Data from Wahoo" in history.summary_label.text()
+    box.check_button.click()
+    qtbot.waitUntil(lambda: "0 new" in box.result.text() and box.check_button.isEnabled())
+    box.all_button.click()
+    qtbot.waitUntil(lambda: service.source("wahoo").job is None)
+    asked = []
+    box.ask_delete = lambda n: asked.append(n)  # cancelled
+    box.disconnect_button.click()
+    time.sleep(0.05)
+    assert asked == [1] and service.source("wahoo").connected
+    box.ask_delete = lambda n: True
+    box.disconnect_button.click()
+    qtbot.waitUntil(lambda: box.status.text() == "Not connected")
+    assert repo.list_sessions() == []
+
+
+def test_lost_login_is_shown(qtbot, services, source):
+    box = services[1].wahoo
+    source.failure = NotConnected("connect again")
+    begin(qtbot, box)
+    finish(qtbot, box)
+    qtbot.waitUntil(lambda: box.message.text() == "connect again")
+    assert box.status.text() == "Not connected" and box.disconnect_button.isEnabled()
+
+
+def test_fetched_rides_reach_the_pages(qtbot, repo, service):
+    bridge = TrainerBridge(FakeTrainer)
+    controller = RideController(repo, bridge)
+    window = MainWindow(repo, bridge, controller, service)
+    qtbot.addWidget(window)
+    add(repo)
+    service.fetch_finished.emit("wahoo", ImportSummary())
+    assert window.history.table.rowCount() == 1
+    controller.shutdown()
+    bridge.shutdown()
+
+
+def test_small_screen(qtbot, services):
+    page = services[1]
+    page.resize(1366 - 168, 700)
+    page.show()
+    assert page.minimumSizeHint().width() <= 1366 - 168
+    assert page.minimumSizeHint().height() <= 650

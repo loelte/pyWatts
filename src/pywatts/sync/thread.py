@@ -5,17 +5,25 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from queue import Queue
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 
-from pywatts.storage.import_files import read_files
+from pywatts.storage.import_files import FileResult, read_archive, read_files
 from pywatts.storage.repo import Sample, SessionRow, Upload
-from pywatts.sync.base import NotConnected, RateLimited, SyncError, Transient
+from pywatts.sync.base import (
+    ActivitySource,
+    NotConnected,
+    RateLimited,
+    RemoteRide,
+    SyncError,
+    Transient,
+)
 from pywatts.sync.gui_gc import GuiGc
 from pywatts.sync.strava import StravaClient, UploadStatus
 
@@ -24,6 +32,7 @@ log = logging.getLogger(__name__)
 RETRY_WAITS_S = (2.0, 8.0)
 POLL_S = 2.0
 POLL_COUNT = 30
+MAX_PAGES = 500
 
 
 @dataclass(frozen=True)
@@ -35,7 +44,44 @@ class UploadJob:
     upload_id: str | None = None  # already accepted, only poll
 
 
+@dataclass(frozen=True)
+class FetchJob:
+    """Load the rides of a service that are not known."""
+
+    source: str
+    known: frozenset[str]  # external ids
+    since: datetime | None  # None: all
+    cancel: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass(frozen=True)
+class FetchedRide:
+    job: FetchJob
+    ride: RemoteRide
+    result: FileResult
+
+
+@dataclass(frozen=True)
+class FetchEnd:
+    job: FetchJob
+    complete: bool  # everything was looked at
+    error: str = ""
+    retry_after_s: float | None = None  # None: repeating does not help
+
+
+@dataclass(frozen=True)
+class SourceState:
+    source: str
+    connected: bool
+    error: str = ""
+    login: bool = False  # answers log_in
+
+
 class _Stopped(Exception):
+    pass
+
+
+class _Cancelled(Exception):
     pass
 
 
@@ -46,8 +92,12 @@ class _Worker:
         self,
         factory: Callable[[], StravaClient] | None,
         post: Callable[[str, object], object],
+        sources: Mapping[str, Callable[[], ActivitySource]],
     ) -> None:
         self._factory = factory
+        self._factories = dict(sources)
+        self._sources: dict[str, ActivitySource] = {}
+        self._denied: set[str] = set()  # their login is stored but refused
         self._post = post
         self._lock = threading.Lock()
         self._closed = False
@@ -91,6 +141,8 @@ class _Worker:
 
     def _main(self) -> None:
         self._report_connection()
+        for name in self._factories:
+            self._report_source(name)
         while (job := self._jobs.get()) is not None and not self.stop.is_set():
             try:
                 job()
@@ -145,6 +197,117 @@ class _Worker:
         finally:
             self._report_connection()
 
+    # --- sources ---
+
+    def _need_source(self, name: str) -> ActivitySource:
+        if name not in self._sources:
+            if name not in self._factories:
+                raise SyncError("Not available with the simulated trainer.")
+            self._sources[name] = self._factories[name]()
+        return self._sources[name]
+
+    def _report_source(self, name: str, error: str = "", login: bool = False) -> None:
+        connected = False
+        try:
+            connected = self._need_source(name).connected and name not in self._denied
+        except SyncError as e:
+            error = error or str(e)
+        except Exception as e:
+            log.exception("%s client failed", name)
+            error = error or f"Unavailable: {type(e).__name__}"
+        self.post("source", SourceState(name, connected, error, login))
+
+    def account(
+        self, name: str, action: Callable[[ActivitySource], object], login: bool, final: bool
+    ) -> None:
+        """Log in or out; always reports the state."""
+        error = ""
+        try:
+            action(self._need_source(name))
+            if final:
+                self._denied.discard(name)
+        except SyncError as e:
+            error = str(e)
+        except Exception as e:
+            log.exception("%s account failed", name)
+            error = f"Unexpected error: {type(e).__name__}"
+        self._report_source(name, error, login)
+
+    def fetch(self, job: FetchJob) -> None:
+        end = FetchEnd(job, False)
+        try:
+            errors = self._fetch(job)
+            end = FetchEnd(job, True, errors)
+        except _Cancelled:
+            pass
+        except RateLimited as e:
+            end = FetchEnd(job, False, str(e), e.retry_after_s)
+        except Transient as e:
+            end = FetchEnd(job, False, str(e), 0.0)
+        except NotConnected as e:
+            end = FetchEnd(job, False, str(e))
+            self._denied.add(job.source)
+            self.post("source", SourceState(job.source, False, str(e)))
+        except SyncError as e:
+            end = FetchEnd(job, False, str(e))
+        except _Stopped:
+            raise
+        except Exception as e:
+            log.exception("fetching from %s failed", job.source)
+            end = FetchEnd(job, False, f"Unexpected error: {type(e).__name__}")
+        finally:
+            self.post("fetch_end", end)
+
+    def _check(self, job: FetchJob) -> None:
+        self._gate()
+        if job.cancel.is_set():
+            raise _Cancelled
+
+    def _fetch(self, job: FetchJob) -> str:
+        """Returns the last error of a single ride, which does not stop the others."""
+        self._check(job)
+        source = self._need_source(job.source)
+        seen: set[str] = set()
+        error = ""
+        for number in range(1, MAX_PAGES + 1):
+            self._check(job)
+            page = source.page(number, job.since)
+            new = [r for r in page.rides if r.external_id not in seen]
+            seen.update(r.external_id for r in new)
+            for ride in new:
+                at = ride.started_at_utc
+                early = job.since is not None and at is not None and at < job.since
+                if early or ride.external_id in job.known:
+                    continue
+                self._check(job)
+                try:
+                    result = self._download(job, source, ride)
+                except (Transient, NotConnected):
+                    raise
+                except SyncError as e:
+                    error = str(e)
+                    continue
+                if result is not None:
+                    self.post("fetched", FetchedRide(job, ride, result))
+                    self._await_acknowledge()
+            # A service that ignores the page number would go on for ever.
+            if not page.more or (page.rides and not new):
+                break
+        return error
+
+    def _download(
+        self, job: FetchJob, source: ActivitySource, ride: RemoteRide
+    ) -> FileResult | None:
+        if ride.cycling is False:
+            return FileResult(ride.external_id, skipped=True, error="not a cycling activity")
+        data = source.download(ride)
+        if data is None:
+            return None
+        self._check(job)  # a ride may have started during the download
+        return read_archive(f"{job.source} {ride.external_id}", data)
+
+    # --- files ---
+
     def import_files(self, paths: list[Path]) -> None:
         try:
             results = read_files(paths)
@@ -153,12 +316,15 @@ class _Worker:
                 if self.cancel_import.is_set() or (result := next(results, None)) is None:
                     break
                 self.post("file", result)
-                # One at a time, so that decoded rides do not pile up in memory.
-                while not self.acknowledged.acquire(timeout=0.2):
-                    if self.stop.is_set():
-                        raise _Stopped
+                self._await_acknowledge()
         finally:
             self.post("import_finished", None)
+
+    def _await_acknowledge(self) -> None:
+        """One at a time, so that decoded rides do not pile up in memory."""
+        while not self.acknowledged.acquire(timeout=0.2):
+            if self.stop.is_set():
+                raise _Stopped
 
     def upload(self, job: UploadJob) -> None:
         sid = job.session.id
@@ -221,7 +387,8 @@ class SyncBridge(QObject):
     """Methods are called from the GUI thread and never block (except shutdown, bounded).
 
     Every upload() ends with exactly one upload_finished, unless the app shuts down.
-    Every file_ready must be answered with acknowledge().
+    Every fetch() ends with exactly one fetch_finished, unless the app shuts down.
+    Every file_ready and ride_fetched must be answered with acknowledge().
     """
 
     connected_changed = pyqtSignal(bool)
@@ -229,19 +396,25 @@ class SyncBridge(QObject):
     upload_finished = pyqtSignal(object)  # Upload
     file_ready = pyqtSignal(object)  # FileResult
     import_finished = pyqtSignal()
+    source_changed = pyqtSignal(object)  # SourceState
+    ride_fetched = pyqtSignal(object)  # FetchedRide
+    fetch_finished = pyqtSignal(object)  # FetchEnd
     error = pyqtSignal(str)
 
     _posted = pyqtSignal(str, object)
 
     def __init__(
-        self, factory: Callable[[], StravaClient] | None, parent: QObject | None = None
+        self,
+        factory: Callable[[], StravaClient] | None,
+        parent: QObject | None = None,
+        sources: Mapping[str, Callable[[], ActivitySource]] | None = None,
     ) -> None:
-        """factory runs on the worker thread; None = no network."""
+        """Factories run on the worker thread. factory: of Strava, None = no network."""
         super().__init__(parent)
         self.connected = False
         self._gc = GuiGc(self)  # before the worker starts
         self._posted.connect(self._dispatch, Qt.ConnectionType.QueuedConnection)
-        worker = self._worker = _Worker(factory, self._posted.emit)
+        worker = self._worker = _Worker(factory, self._posted.emit, sources or {})
         # Deleted by Qt without shutdown().
         self._on_destroyed: Callable[[], None] | None = lambda: worker.close()
         self.destroyed.connect(self._on_destroyed)
@@ -259,6 +432,12 @@ class SyncBridge(QObject):
             self.file_ready.emit(payload)
         elif kind == "import_finished":
             self.import_finished.emit()
+        elif kind == "source":
+            self.source_changed.emit(payload)
+        elif kind == "fetched":
+            self.ride_fetched.emit(payload)
+        elif kind == "fetch_end":
+            self.fetch_finished.emit(payload)
         else:
             self.error.emit(str(payload))
 
@@ -272,6 +451,19 @@ class SyncBridge(QObject):
 
     def disconnect_strava(self) -> None:
         self._worker.submit(self._worker.disconnect)
+
+    def log_in(
+        self, source: str, action: Callable[[ActivitySource], object], final: bool = True
+    ) -> None:
+        """Runs on the worker; answered with source_changed. final: the last step."""
+        self._worker.submit(lambda: self._worker.account(source, action, True, final))
+
+    def log_out(self, source: str) -> None:
+        worker = self._worker
+        worker.submit(lambda: worker.account(source, lambda c: c.disconnect(), False, True))
+
+    def fetch(self, job: FetchJob) -> None:
+        self._worker.submit(lambda: self._worker.fetch(job))
 
     def upload(self, job: UploadJob) -> None:
         self._worker.submit(lambda: self._worker.upload(job))

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from pywatts.core.metrics import average
-from pywatts.storage.repo import Repo, Sample, SessionRow
+from pywatts.storage.repo import SERVICES, Repo, Sample, SessionRow
 from pywatts.sync.service import SyncService
 from pywatts.sync.strava import activity_url
 from pywatts.ui import theme
@@ -297,6 +297,8 @@ class HistoryPage(QWidget):
             f"Avg HR {_num(average(hr) if hr else None, ' bpm')}",
             f"Max HR {_num(max(hr, default=None), ' bpm')}",
         ]
+        if session.source in SERVICES:
+            stats.append(f"Data from {session.source.capitalize()}")
         self.summary_label.setText("   ·   ".join(stats))
         self._plot(samples, has_target=session.source == "pywatts", session=session)
 

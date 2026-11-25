@@ -13,7 +13,14 @@ from typing import Any
 
 import httpx
 
-from pywatts.sync.base import NotConnected, RateLimited, SecretStore, SyncError, Transient
+from pywatts.sync.base import (
+    NotConnected,
+    RateLimited,
+    SecretStore,
+    SyncError,
+    Transient,
+    account_key,
+)
 from pywatts.sync.oauth import browser_login
 
 API = "https://www.strava.com/api/v3"  # https://api-v3.strava.com from 2027-01-04
@@ -37,13 +44,6 @@ class UploadStatus:
     error: str | None = None
 
 
-def forget(store: SecretStore, account: str) -> None:
-    """Delete the login of a removed rider, without telling Strava."""
-    if not account:
-        raise ValueError("no account")
-    store.delete(f"{_KEY}-{account}")
-
-
 class StravaClient:
     """Blocking; used by one worker thread."""
 
@@ -57,7 +57,7 @@ class StravaClient:
     ) -> None:
         """account: keeps the logins of several riders apart."""
         self._store = store
-        self._key = f"{_KEY}-{account}" if account else _KEY
+        self._key = account_key(_KEY, account)
         self._http = http
         self._clock = clock
         self._open_browser = open_browser

@@ -7,8 +7,9 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from pywatts import app, platform
-from pywatts.storage.repo import NAME, Repo
+from pywatts.storage.repo import NAME, SERVICES, Repo
 from pywatts.storage.riders import Riders
+from pywatts.sync.base import MemoryStore
 from pywatts.ui.main_window import LIBRARY, PROFILE, MainWindow
 from pywatts.ui.riders import RiderPicker
 
@@ -22,10 +23,10 @@ def data(tmp_path, monkeypatch):
 
 
 def test_only_the_default_database_uses_the_first_login(data, tmp_path):
-    assert app.strava_account(platform.db_path(), "id") == ""
-    assert app.strava_account(data / "x" / ".." / "pywatts.db", "id") == ""
-    assert app.strava_account(data / "riders" / "pywatts.db", "id") == "id"
-    assert app.strava_account(tmp_path / "pywatts.db", "id") == "id"
+    assert app.sync_account(platform.db_path(), "id") == ""
+    assert app.sync_account(data / "x" / ".." / "pywatts.db", "id") == ""
+    assert app.sync_account(data / "riders" / "pywatts.db", "id") == "id"
+    assert app.sync_account(tmp_path / "pywatts.db", "id") == "id"
 
 
 def test_one_real_app_whatever_the_database(data, tmp_path):
@@ -213,3 +214,52 @@ def test_full_speed_until_the_window_is_shown(data, qapp, monkeypatch):
 def test_set_full_speed_does_not_fail():
     platform.set_full_speed(True)
     platform.set_full_speed(False)
+
+
+def test_services_are_per_rider(monkeypatch):
+    store = MemoryStore()
+    monkeypatch.setattr(app, "KeyringStore", lambda: store)
+    assert tuple(app.SOURCES) == SERVICES
+    for factory in app.SOURCES.values():
+        assert factory("")._key != factory("abc")._key
+        assert not factory("abc").connected
+
+
+@pytest.mark.parametrize("fake", [True, False])
+def test_simulated_rides_never_reach_the_network(data, qapp, monkeypatch, fake):
+    made = []
+
+    class Bridge(app.SyncBridge):
+        def __init__(self, factory, sources):
+            made.append((factory, dict(sources)))
+            super().__init__(None)  # in both cases: this is a test
+
+    monkeypatch.setattr(app, "SyncBridge", Bridge)
+    monkeypatch.setattr(app, "make_bridge", lambda _fake, real=app.make_bridge: real(True))
+    Script(monkeypatch, lambda w: w.close())
+    assert app.run_riders(qapp, Riders(data / "t.db"), fake=fake) == 0
+    ((factory, sources),) = made
+    assert (factory is None) == fake and list(sources) == ([] if fake else list(SERVICES))
+
+
+def test_removing_a_rider_forgets_all_logins(data, qapp, monkeypatch):
+    store = MemoryStore()
+    monkeypatch.setattr(app, "KeyringStore", lambda: store)
+    riders = Riders(data / "t.db")
+    script = Script(monkeypatch, add("Bob"), lambda w: w.close())
+    app.run_riders(qapp, riders, fake=True)
+    bob = next(r for r in riders.list() if r.name == "Bob")
+    for service in ("strava", *SERVICES):
+        store.set(f"{service}-{bob.id}", "x")
+        store.set(service, "first")
+
+    def remove(window):
+        window.riders._forget_login(bob)
+        window.close()
+
+    monkeypatch.setattr(app, "SyncBridge", lambda *a, real=app.SyncBridge, **k: real(None))
+    monkeypatch.setattr(app, "make_bridge", lambda _fake, real=app.make_bridge: real(True))
+    monkeypatch.setattr(app, "choose", lambda r: r.root)
+    script.steps.append(remove)
+    assert app.run_riders(qapp, riders, fake=False) == 0
+    assert sorted(store.values) == sorted(("strava", *SERVICES))

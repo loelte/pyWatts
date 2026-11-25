@@ -1,7 +1,7 @@
 # pyWatts - indoor trainer ERG app
 
 Python >=3.11, PyQt6, pyqtgraph, bleak, platformdirs, sqlite3, fit-tool, pytest(-qt), ruff.
-Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, history, profile, progress, Strava upload, ride import (files; Wahoo planned), training plan with AI coach. No video, other cloud, ANT+. Riders on one device: own data, shared library that everyone may edit, no passwords.
+Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, history, profile, progress, Strava upload, ride import (files; Wahoo and Garmin, automatic), training plan with AI coach. No video, other cloud, ANT+. Riders on one device: own data, shared library that everyone may edit, no passwords.
 
 ## Commands (venv in .venv; POSIX: .venv/bin/python)
 - `.venv\Scripts\python -m pip install -e .[dev]`
@@ -18,7 +18,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - `storage/` db, repo (+SessionRecorder), profile (rider + zones), fit_export, fit_import, import_files. Imports core only; no Qt.
   `storage/riders.py`: list, add, remove riders (`<stem>-riders/<id>.db`, table library.riders).
   `storage/plan_repo.py`: plans, units, ride links, undo log; shares Repo's connection.
-- `sync/` strava + oauth + base (httpx, keyring; no Qt), thread (SyncBridge), service (rules, the only Repo user), gui_gc. Imports storage/core, not ui.
+- `sync/` strava + oauth + wahoo + garmin + base (httpx, keyring; no Qt), thread (SyncBridge), service (rules, the only Repo user), gui_gc. Imports storage/core, not ui.
 - `ai/` tools (no Qt) + server (QLocalServer) + service (rules) + mcp_stdio (own process: no Qt, no DB); pty + launch (program in the terminal), prompt.
 - `ui/` thin widgets; `ride_controller.py` joins Runner + bridge + recorder.
 - `app.py` wiring/CLI; run_riders: one window per rider, everything is torn down and rebuilt on a switch. `platform.py` only OS-specific seam (data dirs, signals, bluetoothctl).
@@ -40,7 +40,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - `RideController(repo, bridge, clock=time.monotonic, parent=None)` QObject: `load(workout)`, `start/pause/resume/skip/extend/stop()`, `runner`, 1 Hz QTimer calling public `tick()`; signals `updated()`, `state_changed(object)`, `session_finished(int)`, `error(str)`
 - `RidePage(repo, bridge, controller)`: `set_workout(workout)`; `ConnectDialog(repo, bridge)`, HrDialog, PowerMeterDialog. Its top bar must fit a 1366 px screen: keep texts short.
 - `RideController.reload_settings()`: power matching, also during a ride; `match_offset_w`
-- `SyncPage(service)`; `MainWindow(..., sync=None)` and `HistoryPage(repo, sync=None)` work without sync.
+- `SyncPage(service)` with `ui/widgets/source_box.py` per service; `MainWindow(..., sync=None)` and `HistoryPage(repo, sync=None)` work without sync.
 - `PlanPage(repo, plans, coach_panel=None)`: `ride_requested(Workout, unit_id)`, `workout_requested(UUID)`, `refresh()` (reloads only while shown). `CoachPanel(repo, plans, coach)`: `undone`, `shutdown()`.
 - `MainWindow(..., riders=None)`: `ui/riders.RiderButton`; `switch_rider` closes the window, app.py reads `next_rider`. Never during a ride.
 - `MainWindow(..., coach=None)`: no terminal without it. Unit colors: theme.PLAN_COLORS, states in ui/widgets/calendar_model.py.
@@ -63,10 +63,14 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - Strava is upload only: its API policy forbids storing data read through it. Secrets only in the OS keychain, never in DB, files or logs. One keychain entry per rider (app.strava_account): the default database keeps the original one, every other uses its rider_id.
 - Strava title: `<workout> with pyWatts` (service.activity_name), imported rides keep their name.
 - Imported rides (sessions.source != 'pywatts') are never auto-uploaded. `imports` rows outlive their session: deleted rides stay away.
-- Wahoo: PKCE, https redirect only (so the address is pasted), no rides of third-party apps, sandbox 250 requests/day. Never send the token to the FIT CDN.
+- Services (base.ActivitySource, repo.SERVICES): fetched START_MS after the source reports connected, FIRST_DAYS back, later checked - OVERLAP_DAYS. Every fetch() ends with one FetchEnd; rate limits end it, the 5 min timer repeats it. `download` returns bytes, so that the gate is passed before decoding. Results of a cancelled job are acknowledged and dropped.
+- Rides from an API are told from files by `imports` (external_id not `sha256:`). `forget_service` is the one exception to "imports outlive their session": Wahoo demands deletion.
+- Wahoo: PKCE, scopes only user_read workouts_read (a scope the app lacks in the portal = invalid_scope; offline_data is for webhooks), refresh needs the verifier too, https redirect only (so the address is pasted), list newest first without date filter, no rides of third-party apps, sandbox 25/5 min, 100/h, 250/day, at most 10 tokens per user. Store the new refresh token before using the new access token. Never send the token to the FIT CDN. Agreement: no passing on (hence the AI consent), delete on withdrawal, privacy policy (PRIVACY.md), attribution.
+- Garmin Personal API (since 2026-10): key of the rider, exchanged for a JWT. Only paths and login are documented, so the parser is tolerant; own use only, never a shared key.
 
 ## AI coach rules
 - Writes go only through PlanRepo.apply("ai", ...): one transaction, logged, undoable. The AI must not change workouts of origin 'user' (enforced in PlanRepo; saving in the editor makes a workout the user's), nor those the AI made for another rider (workouts.owner = rider_id). Rides, profile, FTP: read-only.
+- Rides fetched from a service are hidden from all tools (Tools._hidden, read at every call) unless the rider allowed it (`<service>_ai`); units linked to them are `unknown`. A new tool that shows rides must filter too.
 - No trainer or ride control, SQL, secrets, device addresses or paths in tools. All calls are refused during a ride.
 - Claude Code starts with --strict-mcp-config --restricted --tools "" (verified 2026-11-24 with 2.1.330: only pyWatts tools offered). Never drop a flag to make a start work. Token only in the environment. Consent first, never auto-started.
 - A ridden unit keeps the workout as ridden; others follow the library. Links removed by hand are never matched again.
@@ -96,5 +100,5 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - Progress plots (power curve with hover and W/kg, fitness and form, weekly load, trends) and PNG export: done (ui/widgets/power_curve.py). Data is in session_peaks, sessions (np, load, weight_kg), body_metrics. Estimated loads of rides without power are never stored.
 - Limits: threshold HR, height, sex stored but unused; FIT export has no pauses.
 - Open mode (0x11) never tried on a real trainer; power after a sprint returns to ERG without ramp-in.
-- Sync: Strava upload and Wahoo file import work with real data; Zwift files untested. Wahoo API: run `scripts/wahoo_spike.py` once approved, then build the client.
-- Training plan: tested with the real Claude Code program against a fake API, not yet with a real model. POSIX terminal only tried by script, macOS never. Wahoo: check its API terms on AI use before its rides reach the AI tools.
+- Sync: Strava upload and Wahoo file import work with real data; Zwift files untested. Wahoo and Garmin clients (2026-11-25) are tested against simulated servers only: run `scripts/wahoo_spike.py` (sandbox app approved) and `scripts/garmin_spike.py`, then compare with the parsers.
+- Training plan: tested with the real Claude Code program against a fake API, not yet with a real model. POSIX terminal only tried by script, macOS never.

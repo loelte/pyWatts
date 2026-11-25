@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
@@ -45,6 +46,7 @@ POWER_ZONES = "power_zones"  # custom limits, "" = from FTP
 HR_METHOD = "hr_method"  # "max" | "reserve" | "custom"
 HR_ZONES = "hr_zones"  # custom limits
 STRAVA_AUTO = "strava_auto"  # "1" = upload completed rides; tokens live in the OS keychain
+SERVICES = ("wahoo", "garmin")  # rides are fetched from them; also values of sessions.source
 COACH_COMMAND = "coach_command"  # own command line with {mcp_config}; "" = Claude Code
 COACH_PATH = "coach_path"  # Claude Code executable; "" = search PATH
 COACH_CONSENT = "coach_consent"  # "1" = the rider agreed to send data to the AI provider
@@ -91,7 +93,7 @@ class SessionRow:
     np: float | None = None  # normalized power
     load: float | None = None  # core.metrics.training_load
     weight_kg: float | None = None  # at the time of the ride
-    source: str = "pywatts"  # pywatts | wahoo | zwift | file
+    source: str = "pywatts"  # pywatts | wahoo | garmin | zwift | file
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,12 @@ class Metric:
     day: date
     metric: str  # one of TRACKED
     value: float
+
+
+def service_key(service: str, what: str) -> str:
+    """Setting of a service: "auto" ("0" = not at startup), "since" and "checked" (UTC), "full"
+    ("1" = everything is wanted and not complete), "ai" ("1" = the AI coach sees its rides)."""
+    return f"{service}_{what}"
 
 
 def _utc_text(dt: datetime) -> str:
@@ -445,6 +453,37 @@ class Repo:
         rows = self._conn.execute("SELECT external_id FROM imports WHERE source = ?", (source,))
         return {external_id for (external_id,) in rows}
 
+    def service_sessions(self, service: str) -> set[int]:
+        """Rides fetched from the service, not those imported from its files."""
+        rows = self._conn.execute(
+            "SELECT session_id FROM imports WHERE source = ? AND result = 'imported' "
+            "AND external_id NOT LIKE 'sha256:%' AND session_id IS NOT NULL",
+            (service,),
+        )
+        return {session_id for (session_id,) in rows}
+
+    def hidden_from_ai(self) -> set[int]:
+        """Rides of services whose rides the rider does not share with the AI coach."""
+        hidden: set[int] = set()
+        for service in SERVICES:
+            if self.get_setting(service_key(service, "ai")) != "1":
+                hidden |= self.service_sessions(service)
+        return hidden
+
+    def forget_service(self, service: str) -> int:
+        """Delete everything fetched from a service. Unlike after deleting a single ride, all of
+        it can be fetched or imported again. Returns the number of rides."""
+        with self._conn:
+            rides = self.service_sessions(service)
+            for session_id in rides:
+                self._conn.execute("DELETE FROM imports WHERE session_id = ?", (session_id,))
+                self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self._conn.execute(
+                "DELETE FROM imports WHERE source = ? AND external_id NOT LIKE 'sha256:%'",
+                (service,),
+            )
+        return len(rides)
+
     def _put_import(
         self,
         source: str,
@@ -552,16 +591,19 @@ class Repo:
             ).fetchall()
         )
 
-    def best_peaks(self, since: datetime | None = None) -> dict[int, Peak]:
-        """Best per duration over finished rides, optionally only those started since."""
+    def best_peaks(
+        self, since: datetime | None = None, without: Collection[int] = ()
+    ) -> dict[int, Peak]:
+        """Best per duration over finished rides, optionally only those started since.
+        without: ids of sessions to leave out."""
         rows = self._conn.execute(
-            "SELECT p.duration_s, p.watts, s.started_at_utc, s.weight_kg "
+            "SELECT p.duration_s, p.watts, s.started_at_utc, s.weight_kg, s.id "
             "FROM session_peaks p JOIN sessions s ON s.id = p.session_id "
             "WHERE s.started_at_utc >= ? ORDER BY p.watts, s.started_at_utc DESC",
             (_utc_text(since) if since else "",),
         )
         # ascending: the highest (on ties the earliest) ends up in the dict
-        return {d: Peak(w, _parse_utc(at), kg) for d, w, at, kg in rows}
+        return {d: Peak(w, _parse_utc(at), kg) for d, w, at, kg, i in rows if i not in without}
 
     def record_metric(self, metric: str, value: float, day: date) -> None:
         """Add or replace the day's entry; the newest entry becomes the current setting."""

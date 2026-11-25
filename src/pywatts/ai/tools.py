@@ -57,6 +57,13 @@ _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 # What the AI must not change once a unit was ridden; also compared before an undo.
 _RIDDEN = ("day", "kind", "workout_id", "workout_json", "target_s", "target_load", "skipped")
 
+_RIDE_TOOLS = ("list_rides", "get_progress", "get_calendar", "check_progress")
+_HIDDEN_NOTE = (
+    "Some rides are not shared with you and are missing here: totals, fitness and best power are "
+    "incomplete, and units of status unknown may have been ridden. Ask the rider if it matters."
+)
+_UNKNOWN = "unknown"
+
 T = TypeVar("T")
 
 
@@ -713,6 +720,8 @@ class Tools:
         self._today = today
         self._changed = Changed()
         self._loads: dict[str, float | None] = {}  # by workout JSON
+        self._hidden: set[int] = set()  # sessions the rider does not share
+        self._hidden_units: set[str] = set()  # linked to them
 
     @property
     def changed(self) -> Changed:
@@ -731,7 +740,11 @@ class Tools:
         schema = _TOOLS[name]["inputSchema"]
         args = _check(schema, {} if arguments is None else arguments, "arguments")
         try:
-            text = _dump(getattr(self, f"_{name}")(args))
+            self._find_hidden()
+            result = getattr(self, f"_{name}")(args)
+            if self._hidden and name in _RIDE_TOOLS:
+                result["not_shared"] = _HIDDEN_NOTE
+            text = _dump(result)
         except PlanError as e:
             raise ToolError(str(e)) from e
         except (ValueError, TypeError, KeyError, ArithmeticError, OSError, RecursionError) as e:
@@ -741,6 +754,13 @@ class Tools:
         if len(data) > MAX_RESULT and not self._changed:
             raise ToolError("The result is too large: ask for less.")
         return data.decode("utf-8")
+
+    def _find_hidden(self) -> None:
+        """Again at every call: the rider can change it at any time."""
+        self._hidden, self._hidden_units = self._repo.hidden_from_ai(), set()
+        if self._hidden:
+            links = self._plans.links().values()
+            self._hidden_units = {x.unit_id for x in links if x.session_id in self._hidden}
 
     # --- reading ---
 
@@ -773,14 +793,17 @@ class Tools:
         rides = [
             s
             for s in self._repo.list_sessions()
-            if s.ended_at_utc is not None and first <= _local(s).date() <= last
+            if s.ended_at_utc is not None
+            and first <= _local(s).date() <= last
+            and s.id not in self._hidden
         ]
         page = _page("rides", rides, lambda s: _ride_row(s, units), args, 30)
         return {"today": _dated(self._today())} | page
 
     def _get_ride(self, args: dict[str, Any]) -> Any:
         session = self._repo.get_session(args["ride_id"])
-        if session is None or session.ended_at_utc is None:
+        hidden = session is not None and session.id in self._hidden
+        if session is None or session.ended_at_utc is None or hidden:
             raise ToolError("There is no such ride; see list_rides.")
         units = {link.session_id: link.unit_id for link in self._plans.links().values()}
         row = _ride_row(session, units)
@@ -819,7 +842,7 @@ class Tools:
             weeks.append({"week": monday.isoformat()} | _totals(inside) | state(end))
             monday += timedelta(weeks=1)
         since = datetime.combine(today - timedelta(days=RECENT_DAYS), time.min).astimezone()
-        recent = self._repo.best_peaks(since)
+        recent = self._repo.best_peaks(since, self._hidden)
         history: dict[str, list[Any]] = {}
         for m in self._repo.list_metrics():
             if m.metric in TRACKED:
@@ -827,7 +850,7 @@ class Tools:
         return {
             "today": _dated(today) | state(today),
             "weeks": weeks,
-            "best_power_all_time": _peak_rows(self._repo.best_peaks()),
+            "best_power_all_time": _peak_rows(self._repo.best_peaks(without=self._hidden)),
             f"best_power_{RECENT_DAYS}_days": _peak_rows(recent),
             "ftp_w": load_profile(self._repo).ftp_w,
             f"estimated_ftp_w_{RECENT_DAYS}_days": (
@@ -941,7 +964,11 @@ class Tools:
         counts = {s.value: 0 for s in Status}
         planned_s = planned_load = due_s = due_done_s = 0.0
         missed = []
+        unknown = 0
         for unit, ride in pairs:
+            if unit.id in self._hidden_units:
+                unknown += 1
+                continue
             state = self._status(unit, ride)
             counts[state.value] += 1
             if state is Status.SKIPPED:
@@ -955,7 +982,8 @@ class Tools:
             if state is Status.MISSED:
                 missed.append({"id": unit.id, "title": _text(unit.title, 60)} | _dated(unit.day))
         result: dict[str, Any] = {
-            "units": {"total": len(pairs)} | {k: v for k, v in counts.items() if v},
+            "units": {"total": len(pairs)}
+            | {k: v for k, v in {**counts, _UNKNOWN: unknown}.items() if v},
             "planned": {"seconds": _number(planned_s), "load": _number(planned_load)},
             "done": _totals([ride for _, ride in pairs if ride is not None]),
         }
@@ -1272,10 +1300,13 @@ class Tools:
         return workout
 
     def _rides(self, first: date, last: date) -> list[Ride]:
-        return [_clean(r) for r in self._plans.rides_between(first, last)]
+        rides = self._plans.rides_between(first, last)
+        return [_clean(r) for r in rides if r.session_id not in self._hidden]
 
     def _ride(self, session_id: int, known: dict[int, Ride] | None = None) -> Ride | None:
         """Also rides outside the days in `known`: links can be made by hand."""
+        if session_id in self._hidden:
+            return None
         if known and session_id in known:
             return known[session_id]
         s = self._repo.get_session(session_id)
@@ -1328,7 +1359,7 @@ class Tools:
             "plan_id": unit.plan_id,
             "seconds": _number(unit.duration_s),
             "load": _number(self._unit_load(unit)),
-            "status": self._status(unit, ride).value,
+            "status": _UNKNOWN if unit.id in self._hidden_units else self._status(unit, ride).value,
         }
         if workout is not None:
             row["workout_id"] = str(workout.id)
