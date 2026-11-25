@@ -33,6 +33,7 @@ class RiderPicker(QDialog):
         self.setMinimumWidth(320)
         self._riders = riders
         self.names = QListWidget()
+        self.names.ensurePolished()  # else rows are measured without the stylesheet
         for rider in riders:
             self.names.addItem(QListWidgetItem(rider.name))
         last = max(range(len(riders)), key=lambda i: riders[i].last_used)

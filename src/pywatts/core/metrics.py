@@ -74,6 +74,73 @@ def fitness_form(
     return out
 
 
+def smooth(values: Sequence[float], radius: int = 3) -> list[float]:
+    """Centered moving average over 2*radius+1 points; the window shrinks at the ends."""
+    n = len(values)
+    total = [0.0]
+    for v in values:
+        total.append(total[-1] + v)
+    out = []
+    for i in range(n):
+        lo, hi = max(0, i - radius), min(n, i + radius + 1)
+        out.append((total[hi] - total[lo]) / (hi - lo))
+    return out
+
+
+_G = 9.81
+_RHO = 1.2  # air density, kg/m3
+_CDA = 0.4  # m2, upright-ish rider
+_CRR = 0.005
+_BIKE_KG = 9.0
+_DRIVETRAIN = 0.975
+_MAX_GRADE = 0.2
+_SMOOTH_S = 15  # radius of the altitude smoothing: raw altitude is noisy
+_FALLBACK_KG = 75.0
+
+
+def estimated_power(
+    speed_kmh: Sequence[float | None],
+    altitude_m: Sequence[float | None],
+    weight_kg: float | None,
+) -> list[float]:
+    """Rough 1 Hz power from speed and the slope of the altitude: rolling, air and climbing
+    resistance. Gaps in speed count as standing still; coasting downhill counts as 0 W."""
+    mass = (weight_kg or _FALLBACK_KG) + _BIKE_KG
+    known = [a for a in altitude_m if a is not None]
+    alt: list[float] | None = None
+    if len(known) == len(altitude_m) and known:
+        alt = smooth(known, _SMOOTH_S)
+    out = []
+    for i, kmh in enumerate(speed_kmh):
+        v = (kmh or 0.0) / 3.6
+        if v <= 0:
+            out.append(0.0)
+            continue
+        grade = 0.0
+        if alt is not None and len(alt) > 1:
+            lo, hi = max(0, i - _SMOOTH_S), min(len(alt) - 1, i + _SMOOTH_S)
+            if hi > lo:
+                run = sum((speed_kmh[j] or 0.0) / 3.6 for j in range(lo, hi))
+                grade = (alt[hi] - alt[lo]) / run if run > 1 else 0.0
+                grade = max(-_MAX_GRADE, min(_MAX_GRADE, grade))
+        force = mass * _G * (_CRR + grade) + 0.5 * _RHO * _CDA * v * v
+        out.append(max(0.0, force * v / _DRIVETRAIN))
+    return out
+
+
+def estimated_load(
+    speed_kmh: Sequence[float | None],
+    altitude_m: Sequence[float | None],
+    weight_kg: float | None,
+    ftp_w: int,
+) -> float | None:
+    """Training load guessed from speed and altitude, or None without any speed."""
+    if not any(speed_kmh):
+        return None
+    power = estimated_power(speed_kmh, altitude_m, weight_kg)
+    return training_load(normalized_power(power), len(power), ftp_w)
+
+
 def training_load(np_w: float, duration_s: float, ftp_w: int) -> float:
     """100 = one hour at FTP."""
     if ftp_w <= 0:

@@ -193,3 +193,31 @@ def test_fitness_form():
     assert out[0][0] < out[0][1]  # fatigue rises faster
     assert out[-1][2] > 0  # rested after three weeks off
     assert fitness_form([]) == []
+
+
+def test_smooth_and_estimated_load():
+    from pywatts.core.metrics import estimated_load, smooth
+
+    assert smooth([0.0, 0.0, 9.0, 0.0, 0.0], 1) == [0.0, 3.0, 3.0, 3.0, 0.0]
+    assert estimated_load([None] * 10, [None] * 10, 70, 200) is None
+    flat = estimated_load([30.0] * 3600, [0.0] * 3600, 70, 200)
+    climb = estimated_load([30.0] * 3600, [i * 0.05 for i in range(3600)], 70, 200)
+    assert flat and climb and climb > flat > 0
+
+
+def test_form_range_and_ride_without_power(progress, repo):
+    from datetime import UTC, datetime
+
+    from pywatts.storage.repo import ImportedRide
+
+    start = datetime(2026, 1, 1, 8, tzinfo=UTC)
+    samples = [
+        Sample(t=i, power=None, cadence=None, hr=None, target_w=0, speed=28.0) for i in range(1800)
+    ]
+    ride = ImportedRide(start, start.replace(hour=9), "Spin", samples)
+    repo.import_session(ride, "file", "x", "sha")
+    progress.refresh()
+    assert progress.message.text() == ""
+    assert progress.form._values[-1][0] > 0
+    progress.form.set_range(30)
+    assert progress.form.range_days == 30

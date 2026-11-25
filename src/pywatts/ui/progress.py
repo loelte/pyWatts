@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from pywatts.core.metrics import PEAK_DURATIONS, fitness_form
+from pywatts.core.metrics import PEAK_DURATIONS, estimated_load, fitness_form
 from pywatts.storage.profile import load_profile
 from pywatts.storage.repo import (
     FTP_W,
@@ -53,7 +54,6 @@ from pywatts.ui.widgets.power_curve import (
 )
 
 RECENT_DAYS = 90
-FORM_DAYS = 180
 WEEKS = 26
 # name, unit, lowest, highest, decimals
 METRICS: dict[str, tuple[str, str, int, int, int]] = {
@@ -122,6 +122,7 @@ class ProgressPage(QWidget):
         self._repo = repo
         self._entries: list[Metric] = []
         self._imperial = False
+        self._guessed: dict[int, float | None] = {}  # session id -> estimated load
 
         self.volume = text_label("body")
         self.peaks = _table(["Duration", "All time", "W/kg", "Date", f"Last {RECENT_DAYS} days"])
@@ -276,10 +277,10 @@ class ProgressPage(QWidget):
                 self.peaks.setItem(row, col, QTableWidgetItem(text))
         profile = load_profile(self._repo)
         self.curve.set_curves(best, recent, profile.ftp_w, profile.weight_kg)
-        rides = [s for s in self._repo.list_sessions() if s.ended_at_utc is not None]
+        rides = [self._with_load(s) for s in self._repo.list_sessions() if s.ended_at_utc]
         self.volume.setText("\n".join(self._volume(rides, now, days) for days in (7, 42)))
         days, loads = _daily_loads(rides, now.astimezone().date())
-        self.form.set_series(days[-FORM_DAYS:], fitness_form(loads)[-FORM_DAYS:])
+        self.form.set_series(days, fitness_form(loads))
         weeks, week_load, week_hours = _weekly(rides, now.astimezone().date(), WEEKS)
         self.weekly.set_weeks(weeks, week_load, week_hours)
         self._entries = self._repo.list_metrics()
@@ -291,6 +292,21 @@ class ProgressPage(QWidget):
                 self.log.setItem(row, col, QTableWidgetItem(text))
         self._prepare_input()
         self._update_buttons()
+
+    def _with_load(self, ride: SessionRow) -> SessionRow:
+        """Rides without power get a guessed load from speed, altitude and length.
+        The guess is only used here, never stored."""
+        if ride.load is not None or ride.avg_power is not None or ride.avg_hr is not None:
+            return ride
+        if ride.id not in self._guessed:
+            samples = self._repo.get_samples(ride.id)
+            self._guessed[ride.id] = estimated_load(
+                [s.speed for s in samples],
+                [s.altitude for s in samples],
+                ride.weight_kg,
+                ride.ftp_w,
+            )
+        return replace(ride, load=self._guessed[ride.id])
 
     def _load_trend(self) -> None:
         key = self.trend_metric.currentData()

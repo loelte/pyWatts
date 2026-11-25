@@ -1,10 +1,20 @@
 """The only place for OS-specific code and OS-dependent locations."""
 
+import asyncio
+import logging
 import os
+import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from platformdirs import user_config_path, user_data_path, user_documents_path
+
+log = logging.getLogger(__name__)
+
+APP_ID = "pywatts"  # name of the .desktop file, see scripts/install_linux.sh
+_MAC = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", re.IGNORECASE)
+_TOOL_TIMEOUT_S = 5.0
 
 
 def set_taskbar_identity() -> None:
@@ -13,6 +23,54 @@ def set_taskbar_identity() -> None:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pyWatts")
+
+
+def on_termination(quit_app: Callable[[], object]) -> bool:
+    """Call quit_app when the session ends, the terminal closes or on Ctrl+C: BlueZ keeps a
+    trainer connected, with its load, if we just die. False: not needed on this system.
+
+    Python handlers run only while Python code does, so a Qt loop needs a timer."""
+    if sys.platform == "win32":
+        return False
+    import signal
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, lambda _number, _frame: quit_app())
+    return True
+
+
+async def release_bluetooth_link(addr: str) -> bool:
+    """End a link that an earlier process left behind. True if there was one. Linux only:
+    elsewhere a link ends with its process."""
+    if not sys.platform.startswith("linux") or not _MAC.fullmatch(addr):
+        return False
+    if "Connected: yes" not in await _bluetoothctl("info", addr):
+        return False
+    log.warning("ending a left-over Bluetooth link")
+    await _bluetoothctl("disconnect", addr)
+    return True
+
+
+async def _bluetoothctl(*args: str) -> str:
+    """Its output; "" if it fails or does not answer (it waits for a missing service)."""
+    process = None
+    try:
+        async with asyncio.timeout(_TOOL_TIMEOUT_S):
+            process = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            output, _ = await process.communicate()
+        return output.decode("utf-8", "replace")
+    except (OSError, TimeoutError) as e:
+        log.info("bluetoothctl: %s", e or type(e).__name__)
+        return ""
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
 
 
 def data_dir() -> Path:

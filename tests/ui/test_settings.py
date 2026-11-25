@@ -4,7 +4,17 @@ from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from pywatts.storage.db import open_db
-from pywatts.storage.repo import HR_ADDR, HR_NAME, TRAINER_ADDR, TRAINER_NAME, UNITS, Repo
+from pywatts.storage.repo import (
+    HR_ADDR,
+    HR_NAME,
+    PM_ADDR,
+    PM_NAME,
+    POWER_MATCH,
+    TRAINER_ADDR,
+    TRAINER_NAME,
+    UNITS,
+    Repo,
+)
 from pywatts.trainer.base import DeviceInfo
 from pywatts.ui.settings import SettingsPage
 
@@ -217,3 +227,20 @@ def test_message_is_outside_the_scroll_area(small):
     assert small.message.isHidden()
     small.scan_button.click()
     assert small.message.isVisible() and not small.scroll_area.isAncestorOf(small.message)
+
+
+def test_power_meter_settings(page, repo, qtbot):
+    repo.set_setting(PM_ADDR, "AA")
+    repo.set_setting(PM_NAME, "Assioma")
+    page.refresh()
+    assert page.default_labels[PM_ADDR].text() == "Assioma (AA)"
+    page.forget_buttons[PM_ADDR].click()
+    assert repo.get_setting(PM_ADDR) == "" and not page.forget_buttons[PM_ADDR].isEnabled()
+    assert not page.power_match.isChecked()
+    with qtbot.waitSignal(page.settings_changed):
+        page.power_match.click()
+    assert repo.get_setting(POWER_MATCH) == "1"
+    page.refresh()
+    assert page.power_match.isChecked()
+    page.power_match.click()
+    assert repo.get_setting(POWER_MATCH) == ""

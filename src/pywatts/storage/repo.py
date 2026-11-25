@@ -30,6 +30,9 @@ TRAINER_ADDR = "trainer_addr"
 TRAINER_NAME = "trainer_name"
 HR_ADDR = "hr_addr"
 HR_NAME = "hr_name"
+PM_ADDR = "pm_addr"  # power meter
+PM_NAME = "pm_name"
+POWER_MATCH = "power_match"  # "1" = on
 NAME = "name"
 SEX = "sex"
 BIRTH_DATE = "birth_date"

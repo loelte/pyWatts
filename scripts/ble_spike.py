@@ -1,18 +1,35 @@
 """Hardware check: scan, connect, take control, hold a target, print telemetry, stop.
 
 python scripts/ble_spike.py [--addr ADDR] [--watts 150] [--seconds 30]
+python scripts/ble_spike.py --report [--addr ADDR] [--seconds 30]
+
+--report controls nothing: it prints what a trainer, strap or power meter offers and sends,
+to support devices we do not have. Addresses and numbers in names are masked.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from collections.abc import Awaitable
 from typing import Any
 
 from pywatts.trainer.base import ConnectionState, Telemetry, TrainerEvent
-from pywatts.trainer.ftms import FtmsTrainer
+from pywatts.trainer.cycling_power import CP_MEASUREMENT, CP_SERVICE
+from pywatts.trainer.ftms import (
+    BIKE_DATA,
+    FEATURES,
+    FTMS_SERVICE,
+    HR_MEASUREMENT,
+    HR_SERVICE,
+    MACHINE_STATUS,
+    POWER_RANGE,
+    FtmsTrainer,
+    describe_error,
+    ftms_uuid,
+)
 
 
 class StepFailed(Exception):
@@ -115,14 +132,89 @@ async def run(addr: str | None, watts: int, seconds: float) -> int:
     return code
 
 
+REPORT_READS = {
+    "features": FEATURES,
+    "power range": POWER_RANGE,
+    "power meter features": ftms_uuid(0x2A65),
+    "maker": ftms_uuid(0x2A29),
+    "model": ftms_uuid(0x2A24),
+    "firmware": ftms_uuid(0x2A26),
+    "battery": ftms_uuid(0x2A19),
+}
+REPORT_NOTIFY = {
+    "bike data": BIKE_DATA,
+    "status": MACHINE_STATUS,
+    "power": CP_MEASUREMENT,
+    "heart rate": HR_MEASUREMENT,
+}
+SAMPLES = 8  # of each kind
+
+
+def mask(name: str | None) -> str:
+    return re.sub(r"[0-9A-F]{3,}", "***", name or "no name", flags=re.IGNORECASE)
+
+
+async def report(addr: str | None, seconds: float) -> int:
+    from bleak import BleakClient, BleakScanner
+
+    wanted = {FTMS_SERVICE, CP_SERVICE, HR_SERVICE}
+    found = await step("scan", BleakScanner.discover(timeout=8.0, return_adv=True))
+    devices = []
+    for dev, adv in found.values():
+        uuids = {u.lower() for u in (*adv.service_uuids, *adv.service_data)}
+        if dev.address == addr or (addr is None and uuids & wanted):
+            devices.append((dev, adv))
+    for number, (dev, adv) in enumerate(sorted(devices, key=lambda d: -d[1].rssi), 1):
+        print(f"\nDevice {number}: {mask(adv.local_name or dev.name)}, {adv.rssi} dBm")
+        print(f"  advertises: {', '.join(sorted(adv.service_uuids)) or 'no services'}")
+        try:
+            async with BleakClient(dev) as client:
+                for service in client.services:
+                    print(f"  service {service.uuid}")
+                    for char in service.characteristics:
+                        print(f"    {char.uuid}  {' '.join(sorted(char.properties))}")
+                for name, uuid in REPORT_READS.items():
+                    if client.services.get_characteristic(uuid) is not None:
+                        try:
+                            print(f"  {name}: {bytes(await client.read_gatt_char(uuid)).hex(' ')}")
+                        except Exception as e:
+                            print(f"  {name}: not readable, {describe_error(e)}")
+                counts: dict[str, int] = {}
+
+                def show(name: str, data: bytearray, counts: dict[str, int] = counts) -> None:
+                    counts[name] = counts.get(name, 0) + 1
+                    if counts[name] <= SAMPLES:
+                        print(f"  {name}: {data.hex(' ')}", flush=True)
+
+                for name, uuid in REPORT_NOTIFY.items():
+                    if client.services.get_characteristic(uuid) is not None:
+                        try:
+                            await client.start_notify(uuid, lambda _c, d, name=name: show(name, d))
+                        except Exception as e:
+                            print(f"  {name}: no notifications, {describe_error(e)}")
+                print(f"  listening for {seconds:.0f} s, please pedal")
+                await asyncio.sleep(seconds)
+                print(f"  received: {counts or 'nothing'}")
+        except Exception as e:
+            fail(describe_error(e))
+    if not devices:
+        fail("no trainer, power meter or heart rate strap found")
+    return 0 if devices else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="FTMS trainer hardware check")
     parser.add_argument("--addr", help="device address; default: strongest FTMS device found")
     parser.add_argument("--watts", type=int, default=150)
     parser.add_argument("--seconds", type=float, default=30.0)
+    parser.add_argument("--report", action="store_true", help="describe devices, control nothing")
     args = parser.parse_args()
     try:
+        if args.report:
+            return asyncio.run(report(args.addr, args.seconds))
         return asyncio.run(run(args.addr, args.watts, args.seconds))
+    except StepFailed:
+        return 1
     except KeyboardInterrupt:
         fail("interrupted")
         return 130

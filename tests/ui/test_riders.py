@@ -148,3 +148,21 @@ def test_no_switch_during_a_ride(window, button, riders, repo, monkeypatch):
         assert list(entries(button)) == ["Not during a ride"]
         window.switch_rider(bob)
         assert window.isVisible() and window.next_rider is None
+
+
+@pytest.fixture
+def styled(qapp):
+    qapp.setStyleSheet("QListWidget::item { padding: 30px; }")
+    yield
+    qapp.setStyleSheet("")
+
+
+def test_rows_do_not_overlap(styled, window, qtbot, riders, repo):
+    """The stylesheet counts although a row is selected before the list is shown."""
+    riders.add("Bob", repo)
+    picker = RiderPicker(riders.list())
+    qtbot.addWidget(picker)
+    picker.show()
+    for rows in (window.sidebar, picker.names):
+        first, second = (rows.visualItemRect(rows.item(i)) for i in range(2))
+        assert first.height() > 60 and second.top() > first.bottom()

@@ -9,7 +9,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QLockFile
+from PyQt6.QtCore import QEvent, QLockFile, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
@@ -22,8 +22,9 @@ from pywatts.sync.base import KeyringStore, http_client
 from pywatts.sync.service import SyncService
 from pywatts.sync.strava import StravaClient, forget
 from pywatts.sync.thread import SyncBridge
-from pywatts.trainer.base import HeartRateMonitor, Trainer
-from pywatts.trainer.fake import FakeHrStrap, FakeTrainer
+from pywatts.trainer.base import HeartRateMonitor, PowerMeterMonitor, Trainer
+from pywatts.trainer.fake import FakeHrStrap, FakePowerMeter, FakeTrainer
+from pywatts.trainer.radio import Radio
 from pywatts.trainer.thread import TrainerBridge
 from pywatts.ui import theme
 from pywatts.ui.main_window import PROFILE, MainWindow
@@ -32,20 +33,49 @@ from pywatts.ui.riders import RiderButton, RiderPicker
 
 ICON = Path(__file__).parent / "ui" / "assets" / "icon.png"
 
+SIGNAL_POLL_MS = 500
+
 # Bridges of earlier riders: a thread that did not end in time must not lose its object.
 _ended: list[object] = []
 
 
-def _ftms_factory() -> Trainer:
+def _ftms_factory(radio: Radio) -> Trainer:
     from pywatts.trainer.ftms import FtmsTrainer  # bleak must first load on the BLE thread
 
-    return FtmsTrainer()
+    return FtmsTrainer(radio=radio)
 
 
-def _hr_factory() -> HeartRateMonitor:
+def _hr_factory(radio: Radio) -> HeartRateMonitor:
     from pywatts.trainer.hr import HrStrap
 
-    return HrStrap()
+    return HrStrap(radio=radio)
+
+
+def _pm_factory(radio: Radio) -> PowerMeterMonitor:
+    from pywatts.trainer.power import PowerMeter
+
+    return PowerMeter(radio=radio)
+
+
+def make_bridge(fake: bool) -> TrainerBridge:
+    if fake:
+        made: list[FakeTrainer] = []
+
+        def trainer() -> Trainer:
+            made.append(FakeTrainer())
+            return made[0]
+
+        return TrainerBridge(
+            trainer,
+            hr_factory=FakeHrStrap,
+            pm_factory=lambda: FakePowerMeter(lambda: made[0].pedalling),
+        )
+    radio = Radio()  # belongs to the BLE loop of this bridge
+    return TrainerBridge(
+        partial(_ftms_factory, radio),
+        hr_factory=partial(_hr_factory, radio),
+        pm_factory=partial(_pm_factory, radio),
+    )
 
 
 def _strava_factory(account: str) -> StravaClient:
@@ -110,8 +140,10 @@ def main(argv: list[str] | None = None) -> int:
     platform.set_taskbar_identity()  # before the first window
     app = QApplication(sys.argv[:1])
     app.setApplicationName("pyWatts")
+    app.setDesktopFileName(platform.APP_ID)  # icon under Wayland
     app.setWindowIcon(QIcon(str(ICON)))
     theme.apply(app)
+    quit_on_signals(app)
     db = args.db or default_db(args.fake)
     locks = lock_all(db, args.fake)
     if isinstance(locks, str):
@@ -122,6 +154,14 @@ def main(argv: list[str] | None = None) -> int:
         return run_riders(app, Riders(db), args.fake)
     finally:
         unlock_all(locks)
+
+
+def quit_on_signals(app: QApplication) -> None:
+    """Leave the event loop, dialogs included, so that run_rider frees the trainer."""
+    if platform.on_termination(lambda: app.exit(0)):
+        wake = QTimer(app)  # Python sees signals only while it runs
+        wake.timeout.connect(lambda: None)
+        wake.start(SIGNAL_POLL_MS)
 
 
 def known(riders: Riders) -> list[Rider]:
@@ -185,10 +225,7 @@ def run_rider(
     """Until the window is closed. Returns the next rider, whether they are new, and whether
     the trainer is free again. Closes conn."""
     repo = Repo(conn)
-    bridge = TrainerBridge(
-        FakeTrainer if fake else _ftms_factory,
-        hr_factory=FakeHrStrap if fake else _hr_factory,
-    )
+    bridge = make_bridge(fake)
     controller = RideController(repo, bridge)
     # Simulated rides must never reach the network.
     account = strava_account(rider.path, rider.id)

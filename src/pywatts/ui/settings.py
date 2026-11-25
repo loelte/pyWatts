@@ -30,6 +30,9 @@ from pywatts.storage.repo import (
     HR_ADDR,
     HR_NAME,
     NAV_HIDDEN,
+    PM_ADDR,
+    PM_NAME,
+    POWER_MATCH,
     RIDE_KEYS,
     RIDE_TILES,
     TRAINER_ADDR,
@@ -48,6 +51,10 @@ COACH_NOTE = (
     "Another program keeps the tools it comes with, for example access to files and the "
     "command line. Only Claude Code is limited to pyWatts."
 )
+MATCH_NOTE = (
+    "Corrects the trainer by up to 20 % so that the power meter shows the planned power. If the "
+    "trainer itself is linked to a power meter, switch that off in its maker's app."
+)
 COACH_COMMAND_TIP = (
     "Command line of an AI program that supports MCP. {mcp_config} is replaced by the "
     "path of the server configuration, {prompt} by the coach instructions."
@@ -56,6 +63,7 @@ COACH_COMMAND_TIP = (
 DEFAULT_DEVICES = (
     ("Trainer", TRAINER_ADDR, TRAINER_NAME),
     ("Heart rate strap", HR_ADDR, HR_NAME),
+    ("Power meter", PM_ADDR, PM_NAME),
 )
 FIELD_WIDTH = 260
 DEVICE_ROWS = 3
@@ -178,6 +186,10 @@ class SettingsPage(QWidget):
             defaults.addWidget(text_label("muted", caption), row, 0)
             defaults.addWidget(label, row, 1)
             defaults.addWidget(button, row, 2)
+        self.power_match = QCheckBox("Match the trainer to the power meter")
+        self.power_match.toggled.connect(lambda on: self._store({POWER_MATCH: "1" if on else ""}))
+        match_note = text_label("muted", MATCH_NOTE)
+        match_note.setWordWrap(True)
         self.devices = _FullList(DEVICE_ROWS)
         self.devices.currentRowChanged.connect(lambda _r: self._update_buttons())
         self.devices.itemDoubleClicked.connect(lambda _i: self._select_device())
@@ -196,6 +208,8 @@ class SettingsPage(QWidget):
         layout.addLayout(defaults)
         layout.addWidget(self.devices)
         layout.addLayout(scan_row)
+        layout.addWidget(self.power_match)
+        layout.addWidget(match_note)
         return group
 
     def _build_coach_group(self) -> QGroupBox:
@@ -377,6 +391,9 @@ class SettingsPage(QWidget):
         self.nav_visible.blockSignals(True)
         self.nav_visible.setChecked(self._repo.get_setting(NAV_HIDDEN) != "1")
         self.nav_visible.blockSignals(False)
+        self.power_match.blockSignals(True)
+        self.power_match.setChecked(self._repo.get_setting(POWER_MATCH) == "1")
+        self.power_match.blockSignals(False)
         self.coach_path.setText(self._repo.get_setting(COACH_PATH))
         self.coach_command.setText(self._repo.get_setting(COACH_COMMAND))
         self._fill_tiles()
@@ -446,8 +463,9 @@ class SettingsPage(QWidget):
         if not self._scanning:  # requested elsewhere (connect dialog)
             return
         self._set_scanning(False)
-        for d in sorted(devices, key=lambda d: d.rssi, reverse=True):
-            item = QListWidgetItem(f"{d.name or 'Unnamed'}  ({d.addr}, {d.rssi} dBm)")
+        for d in sorted(devices, key=lambda d: (not d.likely, -d.rssi)):
+            note = "" if d.likely else ", perhaps not controllable"
+            item = QListWidgetItem(f"{d.name or 'Unnamed'}  ({d.addr}, {d.rssi} dBm{note})")
             item.setData(ROLE, (d.name or "", d.addr))
             self.devices.addItem(item)
         if devices:

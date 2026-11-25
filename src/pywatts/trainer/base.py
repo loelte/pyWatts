@@ -20,6 +20,7 @@ class DeviceInfo:
     name: str
     addr: str
     rssi: int
+    likely: bool = True  # False = may not be what was looked for
 
 
 @dataclass(frozen=True)
@@ -42,8 +43,19 @@ class HeartRate:
     battery: int | None = None
 
 
+@dataclass(frozen=True)
+class PowerReading:
+    """From a power meter. cadence_rpm None = not reported; battery in percent."""
+
+    t: float  # time.monotonic()
+    watts: int
+    cadence_rpm: float | None
+    battery: int | None = None
+
+
 TrainerEvent = Telemetry | ConnectionState
 HeartRateEvent = HeartRate | ConnectionState
+PowerEvent = PowerReading | ConnectionState
 
 
 class TrainerError(Exception):
@@ -71,3 +83,12 @@ class HeartRateMonitor(Protocol):
     async def connect(self, addr: str) -> None: ...
     async def disconnect(self) -> None: ...
     def add_listener(self, cb: Callable[[HeartRateEvent], None]) -> None: ...
+
+
+class PowerMeterMonitor(Protocol):
+    """Same rules as HeartRateMonitor."""
+
+    async def scan(self, timeout: float = 5.0) -> list[DeviceInfo]: ...
+    async def connect(self, addr: str) -> None: ...
+    async def disconnect(self) -> None: ...
+    def add_listener(self, cb: Callable[[PowerEvent], None]) -> None: ...

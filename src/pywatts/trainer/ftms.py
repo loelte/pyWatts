@@ -15,8 +15,17 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from bleak import BleakClient, BleakScanner
+from bleak.exc import BleakBluetoothNotAvailableError, BleakDBusError
 
+from pywatts import platform
 from pywatts.trainer.base import ConnectionState, DeviceInfo, Telemetry, TrainerError, TrainerEvent
+from pywatts.trainer.cycling_power import (
+    CP_MEASUREMENT,
+    CP_SERVICE,
+    CrankCadence,
+    parse_power_measurement,
+)
+from pywatts.trainer.radio import Radio
 
 log = logging.getLogger(__name__)
 
@@ -238,6 +247,9 @@ class _Session:
         self.power_range: tuple[int, int] | None = None
         self.bike: dict[str, Any] = {}
         self.hr: tuple[float, int] | None = None
+        # from the Cycling Power service: time, power, cadence
+        self.cp: tuple[float, int, float | None] | None = None
+        self.crank = CrankCadence()
         self.unsupported = False  # last executed command was "not supported"
         self.halted = False  # last load-changing write released the load
 
@@ -248,7 +260,7 @@ class _Session:
 
 
 _BIKE_NAMES = [f.name for f in fields(BikeData) if f.name != "more_data"]
-_HR_FRESH_S = 5.0
+_FRESH_S = 5.0
 
 
 class FtmsTrainer:
@@ -259,6 +271,7 @@ class FtmsTrainer:
         client_factory: Callable[..., Any] = BleakClient,
         scanner: Any = BleakScanner,
         *,
+        radio: Radio | None = None,
         clock: Callable[[], float] = time.monotonic,
         find_timeout: float = 10.0,
         connect_timeout: float = 45.0,
@@ -269,6 +282,7 @@ class FtmsTrainer:
     ) -> None:
         self._client_factory = client_factory
         self._scanner = scanner
+        self._radio = radio or Radio()
         self._clock = clock
         self._find_timeout = find_timeout
         self._connect_timeout = connect_timeout
@@ -299,16 +313,20 @@ class FtmsTrainer:
 
     async def scan(self, timeout: float = 5.0) -> list[DeviceInfo]:
         try:
-            found = await self._scanner.discover(timeout=timeout, return_adv=True)
+            found = await self._radio.run(
+                lambda: self._scanner.discover(timeout=timeout, return_adv=True)
+            )
         except (Exception, asyncio.CancelledError) as e:
             reraise_own_cancel(e)
             raise TrainerError(f"Bluetooth scan failed: {describe_error(e)}") from e
-        devices = [
-            DeviceInfo(adv.local_name or dev.name or "Unknown trainer", dev.address, adv.rssi)
-            for dev, adv in found.values()
-            if FTMS_SERVICE in {u.lower() for u in (*adv.service_uuids, *adv.service_data)}
-        ]
-        return sorted(devices, key=lambda d: -d.rssi)
+        devices = []
+        for dev, adv in found.values():
+            uuids = {u.lower() for u in (*adv.service_uuids, *adv.service_data)}
+            # Some trainers advertise only their power measurement; so do power meters.
+            if FTMS_SERVICE in uuids or CP_SERVICE in uuids:
+                name = adv.local_name or dev.name or "Unknown trainer"
+                devices.append(DeviceInfo(name, dev.address, adv.rssi, FTMS_SERVICE in uuids))
+        return sorted(devices, key=lambda d: (not d.likely, -d.rssi))
 
     async def connect(self, addr: str) -> None:
         await self.disconnect()
@@ -421,7 +439,10 @@ class FtmsTrainer:
         session = self._require_session()
         if session is None:
             return None
-        data = await self._read_optional(session, FEATURES)
+        return await self._features(session)
+
+    async def _features(self, s: _Session) -> Features | None:
+        data = await self._read_optional(s, FEATURES)
         return None if data is None else parse_features(data)
 
     async def request_control(self) -> None:
@@ -527,9 +548,13 @@ class FtmsTrainer:
     async def _establish(self, addr: str) -> None:
         """Open a connection and make it current. Raises TrainerError with all cleaned up."""
         session = _Session()
-        try:
+
+        async def attempt() -> None:
             async with asyncio.timeout(self._connect_timeout):
                 await self._open(session, addr)
+
+        try:
+            await self._radio.run(attempt, priority=True)
             if session.lost:
                 raise _ConnectionLost("Connection to the trainer was lost")
         except BaseException as e:
@@ -537,7 +562,7 @@ class FtmsTrainer:
             task = asyncio.current_task()
             if isinstance(e, asyncio.CancelledError) and not (task and task.cancelling()):
                 # bleak's WinRT futures raise this when Windows aborts an operation.
-                raise TrainerError("Windows aborted the connection attempt") from e
+                raise TrainerError("The system aborted the connection attempt") from e
             if isinstance(e, TrainerError) or not isinstance(e, Exception):
                 raise
             if isinstance(e, TimeoutError):
@@ -549,7 +574,7 @@ class FtmsTrainer:
         self._resend_task = asyncio.ensure_future(self._resend_loop(session))
 
     async def _open(self, s: _Session, addr: str) -> None:
-        device = await self._scanner.find_device_by_address(addr, timeout=self._find_timeout)
+        device = await find_device(self._scanner, addr, self._find_timeout)
         if device is None:
             raise TrainerError("Trainer not found. Is it powered on and not in use elsewhere?")
         s.client = self._client_factory(device, disconnected_callback=lambda _c: self._on_drop(s))
@@ -561,6 +586,12 @@ class FtmsTrainer:
         await self._notify_optional(s, MACHINE_STATUS, lambda _c, d: self._on_status(s, d))
         if s.client.services.get_service(HR_SERVICE) is not None:
             await self._notify_optional(s, HR_MEASUREMENT, lambda _c, d: self._on_hr(s, d))
+        # Only a hint: some trainers announce less than they can, so nothing is refused.
+        features = await self._features(s)
+        log.info("trainer features: %s", features)
+        complete = features is not None and features.power_measurement and features.cadence
+        if not complete and s.client.services.get_service(CP_SERVICE) is not None:
+            await self._notify_optional(s, CP_MEASUREMENT, lambda _c, d: self._on_power(s, d))
         data = await self._read_optional(s, POWER_RANGE)
         s.power_range = None if data is None else parse_power_range(data)
         async with self._lock:
@@ -772,6 +803,12 @@ class FtmsTrainer:
         hr = parse_hr_measurement(bytes(data))
         s.hr = None if hr is None else (self._clock(), hr)
 
+    def _on_power(self, s: _Session, data: bytearray) -> None:
+        measured = parse_power_measurement(bytes(data))
+        if measured.power_w is not None:
+            now = self._clock()
+            s.cp = (now, measured.power_w, s.crank.update(measured, now))
+
     def _on_bike(self, s: _Session, data: bytearray) -> None:
         if s.lost:
             return
@@ -782,21 +819,19 @@ class FtmsTrainer:
         s.bike.update(new)
         now = self._clock()
         hr = s.bike.get("hr_bpm") or None  # 0 = no sensor
-        if s.hr is not None and now - s.hr[0] <= _HR_FRESH_S:
+        if s.hr is not None and now - s.hr[0] <= _FRESH_S:
             hr = s.hr[1]
-        self._emit(
-            Telemetry(
-                now,
-                s.bike.get("power_w"),
-                s.bike.get("cadence_rpm"),
-                s.bike.get("speed_kph"),
-                hr,
-            )
-        )
+        power, cadence = s.bike.get("power_w"), s.bike.get("cadence_rpm")
+        if s.cp is not None and now - s.cp[0] <= _FRESH_S:
+            power = s.cp[1] if power is None else power
+            cadence = s.cp[2] if cadence is None else cadence
+        self._emit(Telemetry(now, power, cadence, s.bike.get("speed_kph"), hr))
 
 
 def _rejected(op: int, result: int) -> TrainerError:
     reason = _RESULT_NAMES.get(result, f"error code 0x{result:02x}")
+    if op == OP_SET_TARGET_POWER and result == RESULT_NOT_SUPPORTED:
+        reason += " (it offers no ERG mode over FTMS)"
     return TrainerError(f"Trainer rejected '{_OP_NAMES[op]}': {reason}")
 
 
@@ -809,5 +844,21 @@ def reraise_own_cancel(e: BaseException) -> None:
             raise e
 
 
+async def find_device(scanner: Any, addr: str, timeout: float) -> Any:
+    """None if it is not there. The caller must not be connected to it."""
+    device = await scanner.find_device_by_address(addr, timeout=timeout)
+    if device is None and await platform.release_bluetooth_link(addr):
+        # It was still linked, e.g. after a crash, and so did not advertise.
+        device = await scanner.find_device_by_address(addr, timeout=timeout)
+    return device
+
+
 def describe_error(e: BaseException) -> str:
+    if isinstance(e, BleakBluetoothNotAvailableError):
+        return f"{e.args[0]} Is Bluetooth switched on?"
+    if isinstance(e, BleakDBusError):
+        if e.dbus_error == "org.freedesktop.DBus.Error.ServiceUnknown":
+            return "The Bluetooth service is not running. Is the package bluez installed?"
+        if e.dbus_error == "org.bluez.Error.NotReady":
+            return "Bluetooth is switched off."
     return str(e) or type(e).__name__

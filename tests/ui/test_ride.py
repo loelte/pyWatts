@@ -10,9 +10,19 @@ from pywatts.core.runner import RunnerState
 from pywatts.core.workout import Ramp, Sprint, Steady, Workout
 from pywatts.storage.db import open_db
 from pywatts.storage.plan_repo import PlanRepo
-from pywatts.storage.repo import FTP_W, HR_ADDR, TRAINER_ADDR, TRAINER_NAME, UNITS, Repo
-from pywatts.trainer.base import ConnectionState, DeviceInfo, HeartRate, Telemetry
-from pywatts.ui.ride import ConnectDialog, HrDialog, RidePage, mmss
+from pywatts.storage.repo import (
+    FTP_W,
+    HR_ADDR,
+    PM_ADDR,
+    PM_NAME,
+    POWER_MATCH,
+    TRAINER_ADDR,
+    TRAINER_NAME,
+    UNITS,
+    Repo,
+)
+from pywatts.trainer.base import ConnectionState, DeviceInfo, HeartRate, PowerReading, Telemetry
+from pywatts.ui.ride import ConnectDialog, HrDialog, PowerMeterDialog, RidePage, mmss
 from pywatts.ui.ride_controller import RideController
 from pywatts.ui.theme import ZONE_COLORS
 
@@ -30,11 +40,16 @@ class FakeBridge(QObject):
     hr_connection_changed = pyqtSignal(object)
     hr_scan_finished = pyqtSignal(list)
     hr_error = pyqtSignal(str)
+    pm_reading = pyqtSignal(object)
+    pm_connection_changed = pyqtSignal(object)
+    pm_scan_finished = pyqtSignal(list)
+    pm_error = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.state = DOWN
         self.hr_state = DOWN
+        self.pm_state = DOWN
         self.calls = []
 
     def go(self, state):
@@ -62,6 +77,19 @@ class FakeBridge(QObject):
 
     def hr_disconnect(self):
         self.calls.append("hr_disconnect")
+
+    def pm_go(self, state):
+        self.pm_state = state
+        self.pm_connection_changed.emit(state)
+
+    def pm_scan(self, timeout=5.0):
+        self.calls.append("pm_scan")
+
+    def pm_connect(self, addr):
+        self.calls.append(("pm_connect", addr))
+
+    def pm_disconnect(self):
+        self.calls.append("pm_disconnect")
 
     def set_target_power(self, w):
         self.calls.append(("target", w))
@@ -518,3 +546,130 @@ def test_sprint_and_countdown(env, page):
     assert "Z3" in label.text() and not label.isHidden()
     env.controller.stop()
     assert [s.target_w for s in env.stored()[1]][20:35] == [0] * 15
+
+
+# --- power meter --------------------------------------------------------------------------------
+
+
+def meter(env, watts, cadence=80.0, age=0.0):
+    env.bridge.pm_reading.emit(PowerReading(env.now - age, watts, cadence, 70))
+
+
+def test_meter_wins_and_falls_back(env):
+    meter(env, 120)  # before the trainer is connected
+    assert env.controller.latest_telemetry.power_w == 120
+    assert env.controller.latest_telemetry.speed_kph is None
+    env.bridge.pm_go(UP)
+    env.ride()
+    for _ in range(5):
+        env.now += 1
+        env.tel(150)
+        meter(env, 144)
+        env.controller.tick()
+    tel = env.controller.latest_telemetry
+    assert (tel.power_w, tel.cadence_rpm, tel.hr_bpm) == (144, 80.0, 140)
+    meter(env, 144, cadence=None)
+    assert env.controller.latest_telemetry.cadence_rpm == 90.0  # the trainer's
+    env.run(10, power=150)  # no readings from the meter
+    assert env.controller.latest_telemetry.power_w == 150
+    env.controller.stop()
+    powers = [s.power for s in env.repo.get_samples(env.finished[0])]
+    assert powers[1:6] == [144] * 5 and powers[-1] == 150
+
+
+def test_losing_the_meter_does_not_pause(env):
+    env.bridge.pm_go(UP)
+    env.ride()
+    env.run(2)
+    meter(env, 144)
+    env.bridge.pm_go(RETRY)
+    assert env.controller.state is RunnerState.RUNNING and env.errors == []
+    assert env.controller.latest_telemetry.power_w == 150
+
+
+def test_meter_controls(env, qtbot):
+    page = RidePage(env.repo, env.bridge, env.controller)
+    qtbot.addWidget(page)
+    opened = []
+    page.open_power_meter_dialog = lambda: opened.append(1)
+    assert page.pm_button.text() == "Power meter" and page.pm_status_label.isHidden()
+    page.pm_button.click()
+    assert opened == [1]
+    env.bridge.pm_go(UP)
+    meter(env, 200)
+    assert page.pm_status_label.text() == "Meter 70 %"
+    assert page.power_label.text() == "200 W"
+    env.bridge.pm_go(RETRY)
+    assert page.pm_status_label.text() == "Meter reconnecting"
+    assert page.pm_button.accessibleName() == "Disconnect power meter"
+    page.pm_button.click()
+    assert env.bridge.calls[-1] == "pm_disconnect"
+    env.bridge.pm_error.emit("no meter")
+    assert "no meter" in page.error_label.text()
+
+
+def test_meter_dialog(env, qtbot):
+    dialog = PowerMeterDialog(env.repo, env.bridge)
+    qtbot.addWidget(dialog)
+    dialog.scan()
+    env.bridge.pm_scan_finished.emit([DeviceInfo("far", "a", -80), DeviceInfo("near", "b", -40)])
+    dialog.connect_selected()
+    assert env.bridge.calls == ["pm_scan", ("pm_connect", "b")]
+    assert (env.repo.get_setting(PM_ADDR), env.repo.get_setting(PM_NAME)) == ("b", "near")
+    assert env.repo.get_setting(TRAINER_ADDR) == ""
+
+
+def test_doubtful_trainers_come_last(env, qtbot):
+    dialog = ConnectDialog(env.repo, env.bridge)
+    qtbot.addWidget(dialog)
+    dialog.scan()
+    env.bridge.scan_finished.emit(
+        [DeviceInfo("meter", "a", -20, likely=False), DeviceInfo("trainer", "b", -80)]
+    )
+    texts = [dialog.device_list.item(i).text() for i in range(2)]
+    assert texts[0].startswith("trainer") and "perhaps" in texts[1]
+
+
+def match_ride(env, seconds, factor=0.96):
+    for _ in range(seconds):
+        env.now += 1
+        told = [c[1] for c in env.bridge.calls if isinstance(c, tuple) and c[0] == "target"][-1]
+        env.tel(told)
+        meter(env, round(told * factor))
+        env.controller.tick()
+
+
+def test_matching(env, qtbot):
+    page = RidePage(env.repo, env.bridge, env.controller)
+    qtbot.addWidget(page)
+    env.repo.set_setting(FTP_W, "250")
+    env.repo.set_setting(POWER_MATCH, "1")
+    env.bridge.pm_go(UP)
+    env.ride(600, 1.0)
+    match_ride(env, 120)
+    assert env.controller.latest_telemetry.power_w == pytest.approx(250, abs=3)
+    offset = env.controller.match_offset_w
+    assert offset > 5 and page.pm_status_label.text() == f"Meter 70 %  ·  +{offset} W"
+    assert env.controller.runner.target_w == 250  # the plan stays the plan
+    env.controller.pause()
+    n = len(env.bridge.calls)
+    for _ in range(100):
+        env.now += 1
+        meter(env, 100)
+        env.controller.tick()
+    assert len(env.bridge.calls) == n  # nothing is written while paused
+    env.controller.resume()
+    env.repo.set_setting(POWER_MATCH, "")
+    match_ride(env, 10)
+    env.controller.reload_settings()
+    assert env.bridge.calls[-1] == ("target", 250) and env.controller.match_offset_w is None
+    env.controller.stop()
+    assert {s.target_w for s in env.repo.get_samples(env.finished[0])[20:100]} == {250}
+
+
+def test_matching_is_off_by_default(env):
+    env.bridge.pm_go(UP)
+    env.ride(600, 0.5)
+    match_ride(env, 120)
+    assert [c for c in env.bridge.calls if isinstance(c, tuple)] == [("target", 100)]
+    assert env.controller.match_offset_w is None

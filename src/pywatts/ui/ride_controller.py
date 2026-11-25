@@ -7,13 +7,15 @@ import math
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 
+from pywatts.core.power_match import PowerMatch
 from pywatts.core.runner import Runner, RunnerState
 from pywatts.core.workout import Block, Workout, flatten
-from pywatts.storage.repo import FLUSH_INTERVAL_S, FTP_W, Repo, Sample, SessionRecorder
-from pywatts.trainer.base import ConnectionState, HeartRate, Telemetry
+from pywatts.storage.repo import FLUSH_INTERVAL_S, FTP_W, POWER_MATCH, Repo, Sample, SessionRecorder
+from pywatts.trainer.base import ConnectionState, HeartRate, PowerReading, Telemetry
 from pywatts.trainer.thread import TrainerBridge
 
 log = logging.getLogger(__name__)
@@ -54,6 +56,8 @@ class RideController(QObject):
         self._hr_n = 0
         self._telemetry: Telemetry | None = None
         self._strap: HeartRate | None = None
+        self._meter: PowerReading | None = None
+        self._match: PowerMatch | None = None  # of the current/last ride
         self._segment = 0  # +1 on every resume
         self._next_s = 0  # next second of ride_s to record
         self._last_target = 0
@@ -69,6 +73,8 @@ class RideController(QObject):
         bridge.telemetry.connect(self._on_telemetry)
         bridge.hr_reading.connect(self._on_heart_rate)
         bridge.hr_connection_changed.connect(self._on_hr_connection)
+        bridge.pm_reading.connect(self._on_power)
+        bridge.pm_connection_changed.connect(self._on_pm_connection)
         bridge.connection_changed.connect(self._on_connection)
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -97,8 +103,21 @@ class RideController(QObject):
         return self._telemetry_at(self._clock())
 
     def _telemetry_at(self, moment: float) -> Telemetry | None:
+        """The power meter wins over the trainer's own power and cadence."""
+        tel, meter = self._trainer_at(moment), self._meter_at(moment)
+        if meter is None:
+            return tel
+        base = tel or Telemetry(meter.t, None, None, None)
+        cadence = base.cadence_rpm if meter.cadence_rpm is None else meter.cadence_rpm
+        return replace(base, power_w=meter.watts, cadence_rpm=cadence)
+
+    def _trainer_at(self, moment: float) -> Telemetry | None:
         tel = self._telemetry
         return tel if tel and abs(moment - tel.t) <= TELEMETRY_MAX_AGE_S else None
+
+    def _meter_at(self, moment: float) -> PowerReading | None:
+        meter = self._meter
+        return meter if meter and abs(moment - meter.t) <= TELEMETRY_MAX_AGE_S else None
 
     @property
     def latest_hr(self) -> int | None:
@@ -111,6 +130,22 @@ class RideController(QObject):
             return strap.bpm
         tel = self._telemetry_at(moment)
         return tel.hr_bpm if tel else None
+
+    @property
+    def match_offset_w(self) -> int | None:
+        """Correction of the trainer's target; None = not matching."""
+        match = self._match
+        if match is None or not match.enabled or not self.is_active or self._meter is None:
+            return None
+        return match.offset_w
+
+    def reload_settings(self) -> None:
+        """Takes effect during a ride too."""
+        if self._match is not None:
+            try:
+                self._match.enabled = self._repo.get_setting(POWER_MATCH) == "1"
+            except Exception:  # matching is optional: never in the way of a ride
+                log.exception("reading the power match setting failed")
 
     def _connected(self) -> bool:
         return self._bridge.state is ConnectionState.CONNECTED
@@ -159,7 +194,9 @@ class RideController(QObject):
         self._pending = []
         self._storage_failed = False
         self.ftp_w = ftp
-        runner = Runner(self.workout, ftp, self._bridge, self._ride_clock)
+        self._match = PowerMatch(self._bridge, self._clock)
+        self.reload_settings()
+        runner = Runner(self.workout, ftp, self._match, self._ride_clock)
         runner.state_changed.append(self._on_state)
         runner.finished.append(self._on_finished)
         runner.target_changed.append(lambda _w: self.updated.emit())
@@ -253,6 +290,15 @@ class RideController(QObject):
             self._strap = None
         self.updated.emit()
 
+    def _on_power(self, reading: PowerReading) -> None:
+        self._meter = reading
+        self.updated.emit()
+
+    def _on_pm_connection(self, state: ConnectionState) -> None:
+        if state is not ConnectionState.CONNECTED:
+            self._meter = None
+        self.updated.emit()
+
     def _on_connection(self, state: ConnectionState) -> None:
         if state is not ConnectionState.CONNECTED:
             if self.state is RunnerState.RUNNING:
@@ -317,6 +363,9 @@ class RideController(QObject):
             self.error.emit("The app was suspended. Ride paused.")
             return
         self.runner.tick()
+        if self._match is not None and self.runner.state is RunnerState.RUNNING:
+            trainer, meter = self._trainer_at(now), self._meter_at(now)
+            self._match.update(trainer.power_w if trainer else None, meter.watts if meter else None)
         self._sample()
 
     def _ride_clock(self) -> float:

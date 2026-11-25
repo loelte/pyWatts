@@ -14,6 +14,8 @@ from pywatts.trainer.base import (
     DeviceInfo,
     HeartRate,
     HeartRateEvent,
+    PowerEvent,
+    PowerReading,
     Telemetry,
     TrainerError,
     TrainerEvent,
@@ -23,6 +25,8 @@ log = logging.getLogger(__name__)
 
 FAKE_DEVICE = DeviceInfo("Fake Trainer", "FA:KE:00:00:00:01", -50)
 FAKE_STRAP = DeviceInfo("TICKR FAKE", "FA:KE:00:00:00:02", -60)
+FAKE_METER = DeviceInfo("Fake Power Meter", "FA:KE:00:00:00:03", -55)
+METER_FACTOR = 0.96  # it disagrees with the trainer, as real ones do
 
 _POWER_TAU_S = 2.0
 _OPEN_POWER_W = 600  # what the simulated rider does in open mode
@@ -50,6 +54,11 @@ class FakeTrainer:
 
     def add_listener(self, cb: Callable[[TrainerEvent], None]) -> None:
         self._listeners.append(cb)
+
+    @property
+    def pedalling(self) -> tuple[float, float]:
+        """Power and cadence of the simulated rider."""
+        return self._power, self._cadence
 
     async def scan(self, timeout: float = 5.0) -> list[DeviceInfo]:
         await asyncio.sleep(min(timeout, 0.5) / self._scale)
@@ -188,5 +197,53 @@ class FakeHrStrap:
             self._emit(state)
 
     def _emit(self, event: HeartRateEvent) -> None:
+        for cb in list(self._listeners):
+            cb(event)
+
+
+class FakePowerMeter:
+    """Simulated power meter on the bike of `rider` (power, cadence); one reading per second."""
+
+    def __init__(
+        self, rider: Callable[[], tuple[float, float]] = lambda: (200.0, 90.0), period: float = 1.0
+    ) -> None:
+        self._rider = rider
+        self._period = period
+        self._listeners: list[Callable[[PowerEvent], None]] = []
+        self._state = ConnectionState.DISCONNECTED
+        self._task: asyncio.Task[None] | None = None
+
+    def add_listener(self, cb: Callable[[PowerEvent], None]) -> None:
+        self._listeners.append(cb)
+
+    async def scan(self, timeout: float = 5.0) -> list[DeviceInfo]:
+        await asyncio.sleep(min(timeout, 0.5))
+        return [FAKE_METER]
+
+    async def connect(self, addr: str) -> None:
+        await self.disconnect()
+        self._set_state(ConnectionState.CONNECTED)
+        self._task = asyncio.ensure_future(self._simulate())
+
+    async def disconnect(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.wait({task})
+        self._set_state(ConnectionState.DISCONNECTED)
+
+    async def _simulate(self) -> None:
+        while True:
+            power, cadence = self._rider()
+            watts = round(max(0.0, power) * METER_FACTOR)
+            self._emit(PowerReading(time.monotonic(), watts, round(cadence), 70))
+            await asyncio.sleep(self._period)
+
+    def _set_state(self, state: ConnectionState) -> None:
+        if state is not self._state:
+            self._state = state
+            self._emit(state)
+
+    def _emit(self, event: PowerEvent) -> None:
         for cb in list(self._listeners):
             cb(event)

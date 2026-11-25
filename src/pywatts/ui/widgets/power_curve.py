@@ -6,9 +6,11 @@ import math
 from datetime import date, datetime, time
 
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QActionGroup
+from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QMenu, QPushButton, QVBoxLayout, QWidget
 
-from pywatts.core.metrics import estimated_ftp
+from pywatts.core.metrics import estimated_ftp, smooth
 from pywatts.storage.repo import Peak
 from pywatts.ui import theme
 from pywatts.ui.widgets.common import text_label
@@ -214,6 +216,17 @@ class PowerCurvePlot(QWidget):
             self.show_duration(min(known, key=lambda d: abs(math.log10(d) - x)))
 
 
+RANGES: tuple[tuple[str, int | None], ...] = (
+    ("1 month", 30),
+    ("3 months", 90),
+    ("6 months", 180),
+    ("1 year", 365),
+    ("Everything", None),
+)
+DEFAULT_RANGE_DAYS = 180
+SMOOTH_RADIUS = 3  # days on each side
+
+
 class FormPlot(QWidget):
     """Fitness (long average of the training load), fatigue (short) and form (difference)."""
 
@@ -234,6 +247,10 @@ class FormPlot(QWidget):
         self.legend = text_label(
             "muted", "Blue: fitness (42 days)    Amber: fatigue (7 days)    Green: form"
         )
+        self._days: list[date] = []
+        self._values: list[tuple[float, float, float]] = []
+        self.range_days: int | None = DEFAULT_RANGE_DAYS
+        self.plot.scene().sigMouseClicked.connect(self._on_click)  # type: ignore[union-attr]
         self.summary = text_label("body")
         self.summary.setWordWrap(True)
         layout = QVBoxLayout(self)
@@ -243,23 +260,54 @@ class FormPlot(QWidget):
         layout.addWidget(self.summary)
 
     def set_series(self, days: list[date], values: list[tuple[float, float, float]]) -> None:
-        """values: (fitness, fatigue, form) per day, same length as days."""
+        """values: (fitness, fatigue, form) per day, same length as days: the whole history.
+        The shown part is `range_days` long; right click changes it."""
+        self._days, self._values = days, values
+        self._redraw()
+
+    def set_range(self, days: int | None) -> None:
+        """Days shown ending today; None = everything."""
+        self.range_days = days
+        self._redraw()
+
+    def _on_click(self, event) -> None:  # noqa: ANN001
+        if event.button() != Qt.MouseButton.RightButton:
+            return
+        if not self.plot.getPlotItem().vb.sceneBoundingRect().contains(event.scenePos()):
+            return
+        menu = QMenu(self)
+        group = QActionGroup(menu)
+        for text, days in RANGES:
+            action = menu.addAction(text)
+            if action is None:
+                continue
+            action.setCheckable(True)
+            action.setChecked(days == self.range_days)
+            action.triggered.connect(lambda _c=False, d=days: self.set_range(d))
+            group.addAction(action)
+        menu.exec(event.screenPos().toPoint())
+        event.accept()
+
+    def _redraw(self) -> None:
+        days, values = self._days, self._values
         if not days:
             for line in self._lines.values():
                 line.setData([], [])
             self.summary.setText("No rides yet.")
             return
         xs = [datetime.combine(d, time(12)).timestamp() for d in days]
-        for i, line in enumerate(self._lines.values()):
-            line.setData(xs, [v[i] for v in values])
-        fitness, fatigue, form = values[-1]
-        self.plot.setXRange(xs[0], xs[-1] + 86400, padding=0)
-        low = min(v[2] for v in values)
-        high = max(max(v[0], v[1]) for v in values)
+        columns = [smooth([v[i] for v in values], SMOOTH_RADIUS) for i in range(3)]
+        for line, column in zip(self._lines.values(), columns, strict=True):
+            line.setData(xs, column)
+        fitness, fatigue, form = values[-1]  # today's numbers stay unsmoothed
+        first = 0 if self.range_days is None else max(0, len(days) - self.range_days)
+        self.plot.setXRange(xs[first], xs[-1] + 86400, padding=0)
+        low = min(column[i] for column in columns[2:] for i in range(first, len(days)))
+        high = max(column[i] for column in columns[:2] for i in range(first, len(days)))
         self.plot.setYRange(min(low, 0) * 1.1, max(high, 1) * 1.1, padding=0)
         self.summary.setText(
             f"Today: fitness {fitness:.0f}  ·  fatigue {fatigue:.0f}  ·  form {form:+.0f} "
-            f"({form_state(form)})"
+            f"({form_state(form)})\nRight click the chart to change the time span."
         )
 
 

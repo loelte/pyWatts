@@ -161,3 +161,25 @@ def test_other_riders_data_stays_apart(data, qapp, monkeypatch):
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("SELECT * FROM main.workouts")
         conn.close()
+
+
+def test_simulated_devices_belong_together(qtbot):
+    bridge = app.make_bridge(fake=True)
+    try:
+        readings = []
+        bridge.pm_reading.connect(readings.append)
+        bridge.connect_trainer("t")
+        bridge.start()
+        bridge.set_target_power(200)
+        bridge.pm_connect("m")
+        qtbot.waitUntil(lambda: bool(readings) and readings[-1].watts > 50, timeout=10_000)
+    finally:
+        assert bridge.shutdown()
+
+
+def test_real_devices_share_the_radio(monkeypatch):
+    made = {}
+    monkeypatch.setattr(app, "TrainerBridge", lambda trainer, **kw: made.update(t=trainer, **kw))
+    app.make_bridge(fake=False)
+    devices = [made[key]() for key in ("t", "hr_factory", "pm_factory")]
+    assert len({id(d._radio) for d in devices}) == 1

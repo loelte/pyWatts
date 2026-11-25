@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setIconSize(QSize(20, 20))
+        self.sidebar.ensurePolished()  # else rows are measured without the stylesheet
         for name in (
             "Library",
             "Ride",
@@ -139,6 +140,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentRow(LIBRARY)
         self.editor.ride_requested.connect(self._ride)
         self.settings.settings_changed.connect(self.editor.refresh)
+        self.settings.settings_changed.connect(controller.reload_settings)
         self.profile.profile_changed.connect(self.editor.refresh)
         self.progress.metrics_changed.connect(self.editor.refresh)
         controller.session_finished.connect(self._rides_changed)

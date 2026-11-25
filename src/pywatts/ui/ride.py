@@ -31,6 +31,8 @@ from pywatts.storage.repo import (
     FTP_W,
     HR_ADDR,
     HR_NAME,
+    PM_ADDR,
+    PM_NAME,
     RIDE_KEYS,
     RIDE_TILES,
     TRAINER_ADDR,
@@ -38,7 +40,13 @@ from pywatts.storage.repo import (
     UNITS,
     Repo,
 )
-from pywatts.trainer.base import ConnectionState, DeviceInfo, HeartRate, Telemetry
+from pywatts.trainer.base import (
+    ConnectionState,
+    DeviceInfo,
+    HeartRate,
+    PowerReading,
+    Telemetry,
+)
 from pywatts.trainer.thread import TrainerBridge
 from pywatts.ui import theme
 from pywatts.ui.ride_controller import RideController
@@ -90,6 +98,9 @@ def announcement(block: Block, ftp_w: int, zones: Zones) -> tuple[str, int] | No
     if zone < COUNTDOWN_MIN_ZONE:
         return None
     return f"Z{zone}  ·  " + " → ".join(str(w) for w in dict.fromkeys(watts)) + " W", zone
+
+
+METER_TIP = "Its power and cadence replace those of the trainer"
 
 
 class ConnectDialog(QDialog):
@@ -155,7 +166,7 @@ class ConnectDialog(QDialog):
         return self._bridge.state
 
     def _ordered(self, devices: list[DeviceInfo]) -> list[DeviceInfo]:
-        return sorted(devices, key=lambda d: d.rssi, reverse=True)
+        return sorted(devices, key=lambda d: (not d.likely, -d.rssi))
 
     # --- actions ---
     def scan(self) -> None:
@@ -198,7 +209,8 @@ class ConnectDialog(QDialog):
         self._scanning = False
         self.device_list.clear()
         for device in self._ordered(devices):
-            item = QListWidgetItem(f"{device.name or device.addr}  ({device.rssi} dBm)")
+            note = "" if device.likely else ", perhaps not controllable"
+            item = QListWidgetItem(f"{device.name or device.addr}  ({device.rssi} dBm{note})")
             item.setData(Qt.ItemDataRole.UserRole, device)
             item.setToolTip(device.addr)
             self.device_list.addItem(item)
@@ -244,6 +256,25 @@ class HrDialog(ConnectDialog):
         return devices  # Wahoo straps first, see trainer/hr.py
 
 
+class PowerMeterDialog(ConnectDialog):
+    NOUN = "power meter"
+    ADDR_KEY, NAME_KEY = PM_ADDR, PM_NAME
+
+    def _subscribe(self) -> None:
+        self._bridge.pm_scan_finished.connect(self._on_scan)
+        self._bridge.pm_connection_changed.connect(self._on_connection)
+        self._bridge.pm_error.connect(self._on_error)
+
+    def _request_scan(self) -> None:
+        self._bridge.pm_scan()
+
+    def _request_connect(self, addr: str) -> None:
+        self._bridge.pm_connect(addr)
+
+    def _link_state(self) -> ConnectionState:
+        return self._bridge.pm_state
+
+
 class RidePage(QWidget):
     def __init__(
         self,
@@ -265,6 +296,7 @@ class RidePage(QWidget):
         self._hr_zones: Zones | None = None
         self._last_strap = ""
         self._battery = ""
+        self._pm_battery = ""
 
         self.title_label = text_label("title")
         # a long name is cut off instead of widening the window
@@ -281,7 +313,11 @@ class RidePage(QWidget):
         self.hr_status_label = text_label("chip")
         self.hr_reconnect_button = QPushButton()
         self.hr_button = QPushButton()
+        self.pm_status_label = text_label("chip")
+        self.pm_button = QPushButton()  # its dialog offers to reconnect
         for widget in (
+            self.pm_status_label,
+            self.pm_button,
             self.hr_status_label,
             self.hr_reconnect_button,
             self.hr_button,
@@ -358,6 +394,7 @@ class RidePage(QWidget):
         self.reconnect_button.clicked.connect(lambda: self._reconnect())
         self.hr_button.clicked.connect(lambda: self._toggle_strap())
         self.hr_reconnect_button.clicked.connect(lambda: self._reconnect_strap())
+        self.pm_button.clicked.connect(lambda: self._toggle_meter())
         self.start_button.clicked.connect(lambda: self._toggle_ride())
         self.skip_button.clicked.connect(lambda: controller.skip())
         self.extend_button.clicked.connect(lambda: controller.extend(30))
@@ -389,6 +426,9 @@ class RidePage(QWidget):
         bridge.hr_reading.connect(self._on_heart_rate)
         bridge.hr_connection_changed.connect(self._on_hr_connection)
         bridge.hr_error.connect(self._on_bridge_error)
+        bridge.pm_reading.connect(self._on_power_reading)
+        bridge.pm_connection_changed.connect(self._on_pm_connection)
+        bridge.pm_error.connect(self._on_bridge_error)
         self.reload_settings()
 
     @staticmethod
@@ -474,7 +514,22 @@ class RidePage(QWidget):
         dialog.exec()
         dialog.deleteLater()
 
+    def open_power_meter_dialog(self) -> None:
+        dialog = PowerMeterDialog(self._repo, self._bridge, self)
+        dialog.exec()
+        dialog.deleteLater()
+
     # --- actions ---
+    def _toggle_meter(self) -> None:
+        if self._bridge.pm_state is not ConnectionState.DISCONNECTED:
+            self._bridge.pm_disconnect()
+            return
+        try:
+            self.open_power_meter_dialog()
+        except Exception as exc:
+            self.show_error(f"Could not open the connection dialog: {exc}")
+        self.reload_settings()
+
     def _toggle_strap(self) -> None:
         if self._bridge.hr_state is not ConnectionState.DISCONNECTED:
             self._bridge.hr_disconnect()
@@ -533,6 +588,14 @@ class RidePage(QWidget):
 
     def _on_hr_connection(self, _state: ConnectionState) -> None:
         self._battery = ""
+        self._refresh()
+
+    def _on_power_reading(self, reading: PowerReading) -> None:
+        self._pm_battery = "" if reading.battery is None else f" {reading.battery} %"
+        self._refresh()
+
+    def _on_pm_connection(self, _state: ConnectionState) -> None:
+        self._pm_battery = ""
         self._refresh()
 
     def _on_state(self, state: RunnerState) -> None:
@@ -657,6 +720,21 @@ class RidePage(QWidget):
         theme.set_role(self.hr_status_label, _tone(strap), "tone")
         self.hr_button.setText("HR strap" if no_strap else "Disconnect strap")
         self.hr_reconnect_button.setVisible(no_strap and bool(self._last_strap))
+        meter = self._bridge.pm_state
+        no_meter = meter is ConnectionState.DISCONNECTED
+        # short, because the bar must fit a small screen; the color tells the state
+        offset = self._controller.match_offset_w
+        text = self._pm_battery if meter is ConnectionState.CONNECTED else f" {meter.value}"
+        text += "" if offset is None else f"  ·  {offset:+d} W"
+        self.pm_status_label.setText("" if no_meter else f"Meter{text}")
+        self.pm_status_label.setToolTip(
+            "" if offset is None else "Correction of the trainer, so that the meter shows the plan"
+        )
+        self.pm_status_label.setVisible(not no_meter)
+        theme.set_role(self.pm_status_label, _tone(meter), "tone")
+        self.pm_button.setText("Power meter" if no_meter else "×")
+        self.pm_button.setToolTip(METER_TIP if no_meter else "Disconnect the power meter")
+        self.pm_button.setAccessibleName("Power meter" if no_meter else "Disconnect power meter")
         offline = link is ConnectionState.DISCONNECTED
         self.connect_button.setText("Connect" if offline else "Disconnect")
         theme.set_role(self.connect_button, "primary" if offline else "")
