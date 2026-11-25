@@ -304,6 +304,13 @@ class Repo:
         )
         return [Sample(*row) for row in rows]
 
+    def speed_altitude(self, session_id: int) -> list[tuple[float | None, float | None]]:
+        """Of every sample: much faster than get_samples for long rides."""
+        return self._conn.execute(
+            "SELECT speed, altitude FROM samples WHERE session_id = ? ORDER BY t, rowid",
+            (session_id,),
+        ).fetchall()
+
     def delete_session(self, session_id: int) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))

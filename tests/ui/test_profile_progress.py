@@ -29,6 +29,8 @@ def page(repo, qtbot):
 def progress(repo, qtbot):
     p = ProgressPage(repo)
     qtbot.addWidget(p)
+    with qtbot.waitExposed(p):  # loads only while shown
+        p.show()
     return p
 
 
@@ -203,6 +205,64 @@ def test_smooth_and_estimated_load():
     flat = estimated_load([30.0] * 3600, [0.0] * 3600, 70, 200)
     climb = estimated_load([30.0] * 3600, [i * 0.05 for i in range(3600)], 70, 200)
     assert flat and climb and climb > flat > 0
+
+
+def test_estimated_power_matches_the_plain_sum():
+    from random import Random
+
+    from pywatts.core import metrics as m
+
+    rng = Random(1)
+    speed = [rng.choice([None, 0.0, 12.0, 28.5, 55.0]) if i % 7 else 20.0 for i in range(900)]
+    altitude = [100 + 20 * (i / 200) ** 2 + rng.uniform(-1, 1) for i in range(900)]
+
+    def plain():
+        mass = 70 + m._BIKE_KG
+        alt = m.smooth(altitude, m._SMOOTH_S)
+        for i, kmh in enumerate(speed):
+            v = (kmh or 0.0) / 3.6
+            if v <= 0:
+                yield 0.0
+                continue
+            lo, hi = max(0, i - m._SMOOTH_S), min(len(alt) - 1, i + m._SMOOTH_S)
+            run = sum((speed[j] or 0.0) / 3.6 for j in range(lo, hi))
+            grade = (alt[hi] - alt[lo]) / run if run > 1 else 0.0
+            grade = max(-m._MAX_GRADE, min(m._MAX_GRADE, grade))
+            force = mass * m._G * (m._CRR + grade) + 0.5 * m._RHO * m._CDA * v * v
+            yield max(0.0, force * v / m._DRIVETRAIN)
+
+    out = m.estimated_power(speed, altitude, 70)
+    assert out == pytest.approx(list(plain()), abs=1e-9)
+    assert max(out) > 0
+    flat = m.estimated_power(speed, [None, *altitude[1:]], 70)  # incomplete: not used
+    assert flat == pytest.approx(m.estimated_power(speed, [None] * 900, 70))
+
+
+def test_nothing_is_read_while_hidden(repo, qtbot, monkeypatch):
+    from datetime import UTC, datetime
+
+    from pywatts.storage.repo import ImportedRide
+
+    start = datetime(2026, 1, 1, 8, tzinfo=UTC)
+    samples = [Sample(float(i), None, None, None, 0, 28.0, altitude=float(i)) for i in range(600)]
+    ride = ImportedRide(start, start.replace(hour=9), "Spin", samples)
+    session = repo.import_session(ride, "file", "x", "sha").session_id
+    assert repo.speed_altitude(session) == [
+        (s.speed, s.altitude) for s in repo.get_samples(session)
+    ]
+    reads = []
+    real = repo.speed_altitude
+    monkeypatch.setattr(repo, "speed_altitude", lambda i: reads.append(i) or real(i))
+    monkeypatch.setattr(repo, "get_samples", lambda i: pytest.fail("not needed"))
+    page = ProgressPage(repo)
+    qtbot.addWidget(page)
+    page.refresh()
+    assert reads == []
+    with qtbot.waitExposed(page):
+        page.show()
+    page.refresh()
+    assert page.message.text() == "" and reads == [session]  # once
+    assert page.form._values[-1][0] > 0
 
 
 def test_form_range_and_ride_without_power(progress, repo):

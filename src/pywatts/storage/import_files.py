@@ -11,13 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from pywatts.storage.fit_import import WAHOO, ZWIFT, NotCycling, parse_fit
 from pywatts.storage.repo import ImportedRide
 
 MAX_FILE_BYTES = 64 * 1024 * 1024  # uncompressed
 _FIT = (".fit", ".fit.gz")
 _OTHER = (".tcx", ".gpx", ".tcx.gz", ".gpx.gz")
-_SOURCES = {ZWIFT: "zwift", WAHOO: "wahoo"}
 
 
 @dataclass(frozen=True)
@@ -82,6 +80,8 @@ def _read(name: str, stream: IO[bytes]) -> FileResult:
 
 
 def read_bytes(name: str, data: bytes) -> FileResult:
+    from pywatts.storage.fit_import import WAHOO, ZWIFT, NotCycling, parse_fit  # slow to load
+
     digest = hashlib.sha256(data).hexdigest()
     try:
         ride = parse_fit(data)
@@ -89,7 +89,8 @@ def read_bytes(name: str, data: bytes) -> FileResult:
         return FileResult(name, digest, skipped=True, error=str(e))
     except ValueError as e:
         return FileResult(name, digest, error=str(e))
-    return FileResult(name, digest, ride, _SOURCES.get(ride.manufacturer, "file"))
+    source = {ZWIFT: "zwift", WAHOO: "wahoo"}.get(ride.manufacturer, "file")
+    return FileResult(name, digest, ride, source)
 
 
 def _limited(stream: IO[bytes]) -> bytes:

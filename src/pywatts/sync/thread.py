@@ -13,7 +13,6 @@ from queue import Queue
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 
-from pywatts.storage.fit_export import fit_bytes
 from pywatts.storage.import_files import read_files
 from pywatts.storage.repo import Sample, SessionRow, Upload
 from pywatts.sync.base import NotConnected, RateLimited, SyncError, Transient
@@ -170,6 +169,8 @@ class _Worker:
                 raise Transient("Waiting for Strava's request limit.")
             client = self._need_client()
             if upload_id is None:
+                from pywatts.storage.fit_export import fit_bytes  # slow to load
+
                 data = fit_bytes(job.session, job.samples)
                 status = self._retry(lambda: client.upload(data, job.name, job.external_id))
             else:

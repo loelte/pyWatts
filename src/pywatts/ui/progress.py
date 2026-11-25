@@ -212,10 +212,11 @@ class ProgressPage(QWidget):
         self.log.itemSelectionChanged.connect(self._update_buttons)
         self.trend_metric.currentIndexChanged.connect(lambda _i: self._guard(self._load_trend))
         self.export_button.clicked.connect(lambda: self._guard(self.export_plot))
-        self.refresh()
 
     def refresh(self) -> None:
-        self._guard(self._load)
+        """Waits until the page is shown: guessing loads reads all samples of some rides."""
+        if self.isVisible():
+            self._guard(self._load)
 
     def _toggle_panel(self, clicked: QPushButton) -> None:
         """Show the clicked panel over the chart, hiding the other; click again to close."""
@@ -298,10 +299,10 @@ class ProgressPage(QWidget):
         if ride.load is not None or ride.avg_power is not None or ride.avg_hr is not None:
             return ride
         if ride.id not in self._guessed:
-            samples = self._repo.get_samples(ride.id)
+            samples = self._repo.speed_altitude(ride.id)
             self._guessed[ride.id] = estimated_load(
-                [s.speed for s in samples],
-                [s.altitude for s in samples],
+                [speed for speed, _altitude in samples],
+                [altitude for _speed, altitude in samples],
                 ride.weight_kg,
                 ride.ftp_w,
             )

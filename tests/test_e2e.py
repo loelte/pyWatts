@@ -79,3 +79,28 @@ def test_core_dependency_rule():
         "sys.exit(str(bad) if bad else 0)"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_window_fits_and_repeats_its_icon(tmp_path, qtbot, monkeypatch):
+    """The taskbar stays without icon if the window was busy when it was asked for it."""
+    conn = open_db(tmp_path / "t.db")
+    repo = Repo(conn)
+    bridge = TrainerBridge(FakeTrainer)
+    controller = RideController(repo, bridge)
+    window = MainWindow(repo, bridge, controller)
+    qtbot.addWidget(window)
+    icons = []
+    monkeypatch.setattr(window, "setWindowIcon", icons.append)
+    with qtbot.waitExposed(window):
+        window.show()
+    qtbot.waitUntil(lambda: len(icons) == 1)
+    available = window.screen().availableGeometry()
+    if window.minimumSizeHint().width() <= available.width():
+        assert available.contains(window.frameGeometry())
+    window.hide()
+    window.setGeometry(50, 60, 1230, 690)
+    window.show()  # placed only once: the user's size stays
+    qtbot.wait(20)
+    assert window.height() == 690 and len(icons) == 1
+    bridge.shutdown()
+    conn.close()

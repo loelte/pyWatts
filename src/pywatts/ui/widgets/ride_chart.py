@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QVBoxLayout, QWid
 
 from pywatts.storage.repo import Sample
 from pywatts.ui import theme
+from pywatts.ui.widgets.common import FlowLayout
 
 LEFT, RIGHT = "left", "right"
 
@@ -63,7 +64,7 @@ class RideChart(QWidget):
         self._cells: dict[str, QWidget] = {}
         self._has_data: dict[str, bool] = {}
         self._side: dict[str, str] = {}
-        bar = QHBoxLayout()
+        bar = FlowLayout()  # the number of channels must not change the width
         for ch in CHANNELS:
             curve = pg.PlotDataItem(
                 [], [], pen=pg.mkPen(ch.color, width=2), connect="finite", antialias=True
@@ -95,7 +96,6 @@ class RideChart(QWidget):
                 axis,
                 cell,
             )
-        bar.addStretch(1)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(bar)

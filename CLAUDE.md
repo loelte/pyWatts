@@ -35,7 +35,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 
 ## UI contracts
 - `EditorPage(repo)`: signal `ride_requested(object)` (Workout); `refresh()`
-- `ProfilePage(repo)`: `profile_changed`, `confirm_discard()`; `ProgressPage(repo)`: `metrics_changed`; `theme.py`: dark theme, ZONE_COLORS, `set_role` (variants: primary, danger, card, chip...); shared widgets in `ui/widgets/common.py`
+- `ProfilePage(repo)`: `profile_changed`, `confirm_discard()`; `ProgressPage(repo)`: `metrics_changed`, `refresh()` reloads only while shown (guessed loads read all samples); `theme.py`: dark theme, ZONE_COLORS, `set_role` (variants: primary, danger, card, chip...); shared widgets in `ui/widgets/common.py`
 - `SettingsPage(repo, bridge)`: signal `settings_changed()`
 - `RideController(repo, bridge, clock=time.monotonic, parent=None)` QObject: `load(workout)`, `start/pause/resume/skip/extend/stop()`, `runner`, 1 Hz QTimer calling public `tick()`; signals `updated()`, `state_changed(object)`, `session_finished(int)`, `error(str)`
 - `RidePage(repo, bridge, controller)`: `set_workout(workout)`; `ConnectDialog(repo, bridge)`, HrDialog, PowerMeterDialog. Its top bar must fit a 1366 px screen: keep texts short.
@@ -55,6 +55,7 @@ Scope: workout editor, ERG rides over FTMS/BLE, HR straps, BLE power meters, his
 - Migrations are append-only (db.MIGRATIONS, db.LIBRARY_MIGRATIONS). `backfill_analysis()` at startup analyses rides of older versions.
 - An exception escaping a Qt slot aborts the app: wrap slot work in `_guard`. Dialogs are overridable methods, for tests.
 - A tick gap > 10 s (sleep) auto-pauses and is not credited; trainer loss auto-pauses, strap and power meter loss do not. Strap HR beats trainer HR; power and cadence of the meter beat the trainer's while fresh (samples.power = the value used).
+- Startup: pages must not read samples when built; fit_tool is imported on use. Windows throttles a process without a visible window (6x slower), so `platform.set_full_speed` holds from start until the window is shown. Measure launches from Explorer: a terminal does not show it.
 - Lists filled and selected before they are shown: `ensurePolished()` first, else rows are measured without the stylesheet (Linux).
 - Sessions snapshot the workout; inserted as `crashed`, updated at finish; flush ~10 s.
 

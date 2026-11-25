@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
 )
 
 from pywatts.core.metrics import average
-from pywatts.storage.fit_export import export_fit
 from pywatts.storage.repo import Repo, Sample, SessionRow
 from pywatts.sync.service import SyncService
 from pywatts.sync.strava import activity_url
@@ -189,6 +188,8 @@ class HistoryPage(QWidget):
         if path is None:
             return
         try:
+            from pywatts.storage.fit_export import export_fit  # slow to load
+
             export_fit(session, self._repo.get_samples(session.id), path)
         except Exception as exc:
             self.show_error(f"Export failed: {exc}")

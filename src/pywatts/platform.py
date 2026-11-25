@@ -25,6 +25,42 @@ def set_taskbar_identity() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pyWatts")
 
 
+def set_full_speed(on: bool) -> None:
+    """Windows 11 may run a process without a visible window on slow cores: building the window
+    then takes several times as long. on: not for us; off: Windows decides again."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class Throttling(ctypes.Structure):  # PROCESS_POWER_THROTTLING_STATE
+        _fields_ = [
+            ("version", wintypes.ULONG),
+            ("control_mask", wintypes.ULONG),
+            ("state_mask", wintypes.ULONG),
+        ]
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessInformation.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        state = Throttling(1, 1 if on else 0, 0)  # execution speed: controlled, not throttled
+        if not kernel32.SetProcessInformation(
+            kernel32.GetCurrentProcess(),
+            4,  # ProcessPowerThrottling
+            ctypes.byref(state),
+            ctypes.sizeof(state),
+        ):
+            log.info("power throttling: error %d", ctypes.get_last_error())
+    except (OSError, AttributeError) as e:  # before Windows 10 1709
+        log.info("power throttling: %s", e)
+
+
 def on_termination(quit_app: Callable[[], object]) -> bool:
     """Call quit_app when the session ends, the terminal closes or on Ctrl+C: BlueZ keeps a
     trainer connected, with its load, if we just die. False: not needed on this system.

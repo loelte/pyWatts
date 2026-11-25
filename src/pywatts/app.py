@@ -34,6 +34,7 @@ from pywatts.ui.riders import RiderButton, RiderPicker
 ICON = Path(__file__).parent / "ui" / "assets" / "icon.png"
 
 SIGNAL_POLL_MS = 500
+FULL_SPEED_MS = 1000  # after the window is shown, so that it is painted too
 
 # Bridges of earlier riders: a thread that did not end in time must not lose its object.
 _ended: list[object] = []
@@ -138,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     platform.set_taskbar_identity()  # before the first window
+    platform.set_full_speed(True)  # until run_rider has shown the window
     app = QApplication(sys.argv[:1])
     app.setApplicationName("pyWatts")
     app.setDesktopFileName(platform.APP_ID)  # icon under Wayland
@@ -224,6 +226,7 @@ def run_rider(
 ) -> tuple[Rider | None, bool, bool]:
     """Until the window is closed. Returns the next rider, whether they are new, and whether
     the trainer is free again. Closes conn."""
+    platform.set_full_speed(True)  # no window between two riders either
     repo = Repo(conn)
     bridge = make_bridge(fake)
     controller = RideController(repo, bridge)
@@ -243,6 +246,7 @@ def run_rider(
     if is_new:
         window.sidebar.setCurrentRow(PROFILE)  # FTP first
     window.show()
+    QTimer.singleShot(FULL_SPEED_MS, partial(platform.set_full_speed, False))
     free = True
     try:
         app.exec()

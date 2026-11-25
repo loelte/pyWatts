@@ -1,4 +1,6 @@
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 from PyQt6.QtCore import QTimer
@@ -183,3 +185,31 @@ def test_real_devices_share_the_radio(monkeypatch):
     app.make_bridge(fake=False)
     devices = [made[key]() for key in ("t", "hr_factory", "pm_factory")]
     assert len({id(d._radio) for d in devices}) == 1
+
+
+def test_fit_tool_is_not_loaded_at_startup():
+    code = "import sys, pywatts.app; sys.exit('fit_tool' in sys.modules)"
+    assert subprocess.run([sys.executable, "-c", code], timeout=60).returncode == 0
+
+
+def test_full_speed_until_the_window_is_shown(data, qapp, monkeypatch):
+    """Windows may run a process without a window on slow cores."""
+    calls = []
+    monkeypatch.setattr(platform, "set_full_speed", calls.append)
+    monkeypatch.setattr(app, "FULL_SPEED_MS", 0)
+    real_init = MainWindow.__init__
+
+    def init(self, *args, **kwargs):
+        calls.append("window")
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(MainWindow, "__init__", init)
+    QTimer.singleShot(300, lambda: [w.close() for w in qapp.topLevelWidgets()])
+    riders = Riders(data / "full-speed.db")
+    assert app.run_riders(qapp, riders, fake=True) == 0
+    assert calls == [True, "window", False]
+
+
+def test_set_full_speed_does_not_fail():
+    platform.set_full_speed(True)
+    platform.set_full_speed(False)

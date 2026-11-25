@@ -6,9 +6,10 @@ import logging
 from datetime import date
 from uuid import UUID
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PyQt6.QtCore import QMargins, QRect, QSize, Qt, QTimer
+from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut, QShowEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -46,7 +47,17 @@ from pywatts.ui.sync import SyncPage
 LIBRARY, RIDE, PLAN, HISTORY, PROGRESS, PROFILE, SETTINGS, SYNC = range(8)
 _FIRST_DAY = date(2000, 1, 1)
 
+SIZE = QSize(1240, 800)
+
 log = logging.getLogger(__name__)
+
+
+def fitted(size: QSize, frame: QMargins, available: QRect) -> QRect:
+    """Where a window of at most this size, without its frame, fits: centered in `available`."""
+    inner = available.marginsRemoved(frame)
+    rect = QRect(inner.topLeft(), size.boundedTo(inner.size()))
+    rect.moveCenter(inner.center())
+    return rect
 
 
 class MainWindow(QMainWindow):
@@ -61,7 +72,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("pyWatts")
-        self.resize(1240, 800)
+        self.resize(SIZE)
+        self._placed = False
         self.controller = controller
         self.editor = EditorPage(repo)
         self.ride = RidePage(repo, bridge, controller)
@@ -169,6 +181,25 @@ class MainWindow(QMainWindow):
             riders.riders_changed.connect(self._show_rider)
             self.profile.profile_changed.connect(self._rider_changed)
             self._show_rider()
+
+    def showEvent(self, event: QShowEvent | None) -> None:
+        super().showEvent(event)
+        if not self._placed:
+            self._placed = True
+            self._fit_screen()
+            QTimer.singleShot(0, self._repeat_icon)
+
+    def _repeat_icon(self) -> None:
+        """The Windows taskbar asks a new window for its icon once. It stays without one if we
+        take longer than about 0.5 s to answer, so tell it again once we are responsive."""
+        self.setWindowIcon(QApplication.windowIcon())
+
+    def _fit_screen(self) -> None:
+        """Windows lets a window that is too high cover the taskbar."""
+        screen, handle = self.screen(), self.windowHandle()
+        if screen is None or handle is None or self.isMaximized() or self.isFullScreen():
+            return
+        self.setGeometry(fitted(self.size(), handle.frameMargins(), screen.availableGeometry()))
 
     def switch_rider(self, rider: Rider, is_new: bool = False) -> None:
         """Closes the window, with all its questions; app.py opens the next one."""

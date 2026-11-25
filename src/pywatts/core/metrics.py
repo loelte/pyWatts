@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from itertools import accumulate
 
 _WINDOW = 30
 
@@ -128,9 +129,10 @@ def estimated_power(
     alt: list[float] | None = None
     if len(known) == len(altitude_m) and known:
         alt = smooth(known, _SMOOTH_S)
+    speed = [(kmh or 0.0) / 3.6 for kmh in speed_kmh]
+    distance = [0.0, *accumulate(speed)]  # before each sample
     out = []
-    for i, kmh in enumerate(speed_kmh):
-        v = (kmh or 0.0) / 3.6
+    for i, v in enumerate(speed):
         if v <= 0:
             out.append(0.0)
             continue
@@ -138,7 +140,7 @@ def estimated_power(
         if alt is not None and len(alt) > 1:
             lo, hi = max(0, i - _SMOOTH_S), min(len(alt) - 1, i + _SMOOTH_S)
             if hi > lo:
-                run = sum((speed_kmh[j] or 0.0) / 3.6 for j in range(lo, hi))
+                run = distance[hi] - distance[lo]
                 grade = (alt[hi] - alt[lo]) / run if run > 1 else 0.0
                 grade = max(-_MAX_GRADE, min(_MAX_GRADE, grade))
         force = mass * _G * (_CRR + grade) + 0.5 * _RHO * _CDA * v * v

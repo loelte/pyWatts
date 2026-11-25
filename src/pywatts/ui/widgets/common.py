@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, QSize, Qt
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPaintEvent
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
     QLabel,
     QLayout,
+    QLayoutItem,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -51,6 +52,68 @@ def card(*widgets: QWidget, margin: int = 10) -> QFrame:
     for widget in widgets:
         layout.addWidget(widget)
     return frame
+
+
+class FlowLayout(QLayout):
+    """Left to right, wrapping into more rows. It is only as wide as its widest widget, so its
+    content never widens the panel it is in."""
+
+    def __init__(self, spacing: int = 4) -> None:
+        super().__init__()
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item: QLayoutItem | None) -> None:
+        if item is not None:
+            self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientation:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._arrange(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._arrange(rect, move=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            if not item.isEmpty():
+                size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _arrange(self, rect: QRect, move: bool) -> int:
+        """The height that is needed. Hidden widgets take no room."""
+        x, y, row = rect.x(), rect.y(), 0
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            size = item.sizeHint()
+            if row and x + size.width() > rect.x() + rect.width():
+                x, y, row = rect.x(), y + row + self.spacing(), 0
+            if move:
+                item.setGeometry(QRect(QPoint(x, y), size))
+            x += size.width() + self.spacing()
+            row = max(row, size.height())
+        return y + row - rect.y()
 
 
 class ValueLabel(QLabel):
