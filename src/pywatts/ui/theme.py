@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyqtgraph as pg
@@ -42,6 +43,64 @@ PLAN_COLORS = {
 }
 ON_ZONE = "#0b0c0e"  # text on a zone color
 POWER_TRACE = "#ffffff"
+
+
+@dataclass(frozen=True)
+class ChartColors:
+    """Colors and sizes of the progress charts: on screen, or exported on white."""
+
+    background: str
+    heading: str
+    text: str  # tick labels, axis titles, summary
+    muted: str
+    axis: str  # axis line and ticks; the grid is this color with grid_alpha
+    grid_alpha: float
+    first: str  # all time, fitness, bars, trends
+    second: str  # recent, fatigue, averages
+    third: str  # form
+    reference: str  # FTP line
+    zero: str  # zero line, hover cursor
+    line_width: float
+    symbol_size: int
+    font_px: int | None  # None: the application font
+    line_labels: bool  # names on reference lines; the export has a legend instead
+
+
+SCREEN_CHART = ChartColors(
+    background=SURFACE,
+    heading=TEXT,
+    text=MUTED,
+    muted=MUTED,
+    axis=MUTED,
+    grid_alpha=0.12,
+    first=ACCENT,
+    second=POWER,
+    third=OK,
+    reference=MUTED,
+    zero=BORDER_STRONG,
+    line_width=2,
+    symbol_size=6,
+    font_px=None,
+    line_labels=True,
+)
+# The screen colors are made for a dark background: amber and green fade on white.
+PRINT_CHART = ChartColors(
+    background="#ffffff",
+    heading="#111827",
+    text="#374151",
+    muted="#6b7280",
+    axis="#9ca3af",
+    grid_alpha=0.3,
+    first="#2563eb",
+    second="#d97706",
+    third="#059669",
+    reference="#6b7280",
+    zero="#9ca3af",
+    line_width=3,
+    symbol_size=9,
+    font_px=16,
+    line_labels=False,
+)
 
 _ASSETS = (Path(__file__).parent / "assets").as_posix()
 

@@ -1,18 +1,25 @@
-"""Best power curve (all time and recent) and the fitness / fatigue / form chart."""
+"""Best power curve (all time and recent), fitness / fatigue / form, load and trend charts.
+
+Every chart takes its colors (theme.SCREEN_CHART or theme.PRINT_CHART) and can make a hidden
+copy of itself in other colors: the export draws that copy, never the dark screen."""
 
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from typing import Literal
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QActionGroup
+from PyQt6.QtGui import QActionGroup, QFont, QFontMetrics
 from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QMenu, QPushButton, QVBoxLayout, QWidget
 
 from pywatts.core.metrics import estimated_ftp, gaussian_smooth
 from pywatts.storage.repo import Peak
 from pywatts.ui import theme
+from pywatts.ui.theme import ChartColors
 from pywatts.ui.widgets.common import text_label
 
 NO_VALUE = "--"
@@ -23,20 +30,99 @@ def duration_label(seconds: int) -> str:
     return f"{seconds} s" if seconds < 60 else f"{seconds // 60} min"
 
 
-def _style(plot: pg.PlotWidget) -> None:
+def _font(colors: ChartColors) -> QFont | None:
+    if colors.font_px is None:
+        return None
+    font = QFont()
+    font.setPixelSize(colors.font_px)
+    return font
+
+
+def _style(plot: pg.PlotWidget, colors: ChartColors) -> None:
     plot.setMenuEnabled(False)
     plot.hideButtons()
     plot.setMouseEnabled(x=False, y=False)
-    plot.showGrid(x=True, y=True, alpha=0.12)
-    for axis in ("left", "bottom"):
-        plot.getAxis(axis).enableAutoSIPrefix(False)
+    plot.setBackground(colors.background)
+    font = _font(colors)
+    for name in ("left", "bottom"):
+        axis = plot.getAxis(name)
+        axis.enableAutoSIPrefix(False)
+        axis.setPen(colors.axis)
+        axis.setTextPen(colors.text)
+        axis.labelStyle["color"] = colors.text
+        if font is not None:
+            axis.setTickFont(font)
+            # pyqtgraph makes room for larger text only after painting once: too late for
+            # a single export. setStyle applies the size.
+            axis.textHeight = QFontMetrics(font).height() + 2
+            axis.setStyle(autoExpandTextSpace=True)
+            axis.labelStyle["font-size"] = f"{colors.font_px}px"
+    plot.showGrid(x=True, y=True, alpha=colors.grid_alpha)
 
 
-class PowerCurvePlot(QWidget):
+def _line(colors: ChartColors, color: str, dots: bool) -> dict:
+    """Options of PlotWidget.plot for a solid line, with dots on the values if asked."""
+    options: dict = {"pen": pg.mkPen(color, width=colors.line_width)}
+    if dots:
+        options.update(symbol="o", symbolSize=colors.symbol_size, symbolBrush=color, symbolPen=None)
+    return options
+
+
+def _level(colors: ChartColors, color: str, label: str, position: float) -> pg.InfiniteLine:
+    """A dashed horizontal line with a label at one end, unless a legend explains it."""
+    line = pg.InfiniteLine(
+        angle=0,
+        pen=pg.mkPen(color, width=max(1, colors.line_width - 1), style=Qt.PenStyle.DashLine),
+        label=label,
+        labelOpts={"position": position, "color": color},
+    )
+    if not colors.line_labels:
+        line.label.hide()
+    return line
+
+
+@dataclass(frozen=True)
+class LegendEntry:
+    color: str
+    text: str
+    mark: Literal["line", "dots", "dash", "bar"]
+
+
+class Chart(QWidget):
+    """A progress chart that can be drawn again in other colors, for the export."""
+
+    plot: pg.PlotWidget
+
+    def __init__(self, colors: ChartColors, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.export_summary = ""  # the summary without hints about using the screen
+
+    def clone(self, colors: ChartColors) -> Chart:
+        """A hidden copy with the same data, options and time span in other colors."""
+        raise NotImplementedError
+
+    def title(self) -> str:
+        raise NotImplementedError
+
+    def subtitle(self) -> str:
+        raise NotImplementedError
+
+    def legend_entries(self) -> list[LegendEntry]:
+        raise NotImplementedError
+
+
+class PowerCurvePlot(Chart):
     """Mean-maximal power over duration on a log axis. Hover shows both curves at a duration."""
 
-    def __init__(self, recent_days: int, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(
+        self,
+        recent_days: int,
+        parent: QWidget | None = None,
+        *,
+        colors: ChartColors = theme.SCREEN_CHART,
+    ) -> None:
+        super().__init__(colors, parent)
         self._recent_days = recent_days
         self._best: dict[int, Peak] = {}
         self._recent: dict[int, Peak] = {}
@@ -45,34 +131,17 @@ class PowerCurvePlot(QWidget):
         self.per_kg = False
 
         self.plot = pg.PlotWidget()
-        _style(self.plot)
+        _style(self.plot, colors)
         self.plot.setLabel("bottom", "duration")
         self.plot.getAxis("bottom").setTicks(
             [[(math.log10(d), duration_label(d)) for d in TICK_SECONDS]]
         )
         self.plot.setMinimumHeight(220)
-        self._all_line = self.plot.plot(
-            pen=pg.mkPen(theme.ACCENT, width=2),
-            symbol="o",
-            symbolSize=6,
-            symbolBrush=theme.ACCENT,
-            symbolPen=None,
-        )
-        self._recent_line = self.plot.plot(
-            pen=pg.mkPen(theme.POWER, width=2),
-            symbol="o",
-            symbolSize=6,
-            symbolBrush=theme.POWER,
-            symbolPen=None,
-        )
-        self._ftp_line = pg.InfiniteLine(
-            angle=0,
-            pen=pg.mkPen(theme.MUTED, width=1, style=pg.QtCore.Qt.PenStyle.DashLine),
-            label="FTP",
-            labelOpts={"position": 0.95, "color": theme.MUTED},
-        )
+        self._all_line = self.plot.plot(**_line(colors, colors.first, dots=True))
+        self._recent_line = self.plot.plot(**_line(colors, colors.second, dots=True))
+        self._ftp_line = _level(colors, colors.reference, "FTP", 0.95)
         self.plot.addItem(self._ftp_line, ignoreBounds=True)
-        self._cursor = pg.InfiniteLine(pen=pg.mkPen(theme.BORDER_STRONG, width=1))
+        self._cursor = pg.InfiniteLine(pen=pg.mkPen(colors.zero, width=1))
         self._cursor.hide()
         self.plot.addItem(self._cursor, ignoreBounds=True)
         self.plot.scene().sigMouseMoved.connect(self._hover)  # type: ignore[union-attr]
@@ -106,6 +175,28 @@ class PowerCurvePlot(QWidget):
         layout.addWidget(self.readout)
         layout.addWidget(self.summary)
 
+    def clone(self, colors: ChartColors) -> PowerCurvePlot:
+        copy = PowerCurvePlot(self._recent_days, colors=colors)
+        copy.per_kg = self.per_kg
+        copy.set_curves(self._best, self._recent, self._ftp_w, self._weight_kg)
+        return copy
+
+    def title(self) -> str:
+        return "Power curve"
+
+    def subtitle(self) -> str:
+        unit = "W/kg" if self.per_kg else "watts"
+        return f"Best average power over each duration, in {unit}"
+
+    def legend_entries(self) -> list[LegendEntry]:
+        entries = [
+            LegendEntry(self.colors.first, "All time", "dots"),
+            LegendEntry(self.colors.second, f"Last {self._recent_days} days", "dots"),
+        ]
+        if self._ftp_line.isVisible():
+            entries.append(LegendEntry(self.colors.reference, "FTP", "dash"))
+        return entries
+
     def set_curves(
         self,
         best: dict[int, Peak],
@@ -116,7 +207,8 @@ class PowerCurvePlot(QWidget):
         self._best, self._recent = best, recent
         self._ftp_w, self._weight_kg = ftp_w, weight_kg
         self._redraw()
-        self.summary.setText(self._insight())
+        self.export_summary = self._insight()
+        self.summary.setText(self.export_summary)
 
     def set_per_kg(self, per_kg: bool) -> None:
         self.per_kg = per_kg
@@ -229,14 +321,28 @@ RANGE_HINT = "Right click the chart to change the time span."
 DAY_S = 86400
 
 
-class RangePlot(QWidget):
+def span_text(days: int | None) -> str:
+    """'last 6 months', 'last month', 'all time'."""
+    if days is None:
+        return "all time"
+    text = next((t for t, d in RANGES if d == days), f"{days} days")
+    return f"last {text.removeprefix('1 ')}"
+
+
+class RangePlot(Chart):
     """A chart over dates. Right click chooses the time span, which ends today."""
 
-    def __init__(self, range_days: int | None, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(
+        self,
+        range_days: int | None,
+        parent: QWidget | None = None,
+        *,
+        colors: ChartColors = theme.SCREEN_CHART,
+    ) -> None:
+        super().__init__(colors, parent)
         self.range_days = range_days
         self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
-        _style(self.plot)
+        _style(self.plot, colors)
         self.plot.setMinimumHeight(220)
         self.plot.scene().sigMouseClicked.connect(self._on_click)  # type: ignore[union-attr]
         self.summary = text_label("body")
@@ -246,6 +352,10 @@ class RangePlot(QWidget):
         """Days shown ending today; None = everything."""
         self.range_days = days
         self._redraw()
+
+    def _set_summary(self, text: str, hint: bool = True) -> None:
+        self.export_summary = text
+        self.summary.setText(f"{text}\n{RANGE_HINT}" if hint else text)
 
     def _on_click(self, event) -> None:  # noqa: ANN001
         if event.button() != Qt.MouseButton.RightButton:
@@ -272,16 +382,18 @@ class RangePlot(QWidget):
 class FormPlot(RangePlot):
     """Fitness (long average of the training load), fatigue (short) and form (difference)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(DEFAULT_RANGE_DAYS, parent)
+    def __init__(
+        self, parent: QWidget | None = None, *, colors: ChartColors = theme.SCREEN_CHART
+    ) -> None:
+        super().__init__(DEFAULT_RANGE_DAYS, parent, colors=colors)
         self.plot.setLabel("left", "load / day")
         self.plot.addItem(
-            pg.InfiniteLine(angle=0, pen=pg.mkPen(theme.BORDER_STRONG, width=1)), ignoreBounds=True
+            pg.InfiniteLine(angle=0, pen=pg.mkPen(colors.zero, width=1)), ignoreBounds=True
         )
         self._lines = {
-            "fitness": self.plot.plot(pen=pg.mkPen(theme.ACCENT, width=2)),
-            "fatigue": self.plot.plot(pen=pg.mkPen(theme.POWER, width=2)),
-            "form": self.plot.plot(pen=pg.mkPen(theme.OK, width=2)),
+            "fitness": self.plot.plot(**_line(colors, colors.first, dots=False)),
+            "fatigue": self.plot.plot(**_line(colors, colors.second, dots=False)),
+            "form": self.plot.plot(**_line(colors, colors.third, dots=False)),
         }
         self.legend = text_label(
             "muted", "Blue: fitness (42 days)    Amber: fatigue (7 days)    Green: form"
@@ -294,6 +406,25 @@ class FormPlot(RangePlot):
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.summary)
 
+    def clone(self, colors: ChartColors) -> FormPlot:
+        copy = FormPlot(colors=colors)
+        copy.range_days = self.range_days
+        copy.set_series(self._days, self._values)
+        return copy
+
+    def title(self) -> str:
+        return "Fitness and form"
+
+    def subtitle(self) -> str:
+        return f"From the training load per day, {span_text(self.range_days)}"
+
+    def legend_entries(self) -> list[LegendEntry]:
+        return [
+            LegendEntry(self.colors.first, "Fitness (42 days)", "line"),
+            LegendEntry(self.colors.second, "Fatigue (7 days)", "line"),
+            LegendEntry(self.colors.third, "Form (fitness - fatigue)", "line"),
+        ]
+
     def set_series(self, days: list[date], values: list[tuple[float, float, float]]) -> None:
         """values: (fitness, fatigue, form) per day, same length as days: the whole history."""
         self._days, self._values = days, values
@@ -304,7 +435,7 @@ class FormPlot(RangePlot):
         if not days:
             for line in self._lines.values():
                 line.setData([], [])
-            self.summary.setText("No rides yet.")
+            self._set_summary("No rides yet.", hint=False)
             return
         xs = [datetime.combine(d, time(12)).timestamp() for d in days]
         columns = [gaussian_smooth([v[i] for v in values], SMOOTH_DAYS) for i in range(3)]
@@ -316,9 +447,9 @@ class FormPlot(RangePlot):
         low = min(column[i] for column in columns[2:] for i in range(first, len(days)))
         high = max(column[i] for column in columns[:2] for i in range(first, len(days)))
         self.plot.setYRange(min(low, 0) * 1.1, max(high, 1) * 1.1, padding=0)
-        self.summary.setText(
+        self._set_summary(
             f"Today: fitness {fitness:.0f}  ·  fatigue {fatigue:.0f}  ·  form {form:+.0f} "
-            f"({form_state(form)})\n{RANGE_HINT}"
+            f"({form_state(form)})"
         )
 
 
@@ -334,81 +465,290 @@ def form_state(form: float) -> str:
     return "heavy fatigue, risk of overreaching"
 
 
-class WeeklyPlot(RangePlot):
-    """Training load per week (Monday to Sunday) as bars."""
+@dataclass(frozen=True)
+class Period:
+    button: str
+    days: float  # mean length
+    average_of: int  # periods before the current one
+    current: str  # summary heading
+    previous: str  # plural, for "the average of the 4 weeks before"
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(DEFAULT_RANGE_DAYS, parent)
-        self._weeks: list[date] = []
-        self._loads: list[float] = []
-        self._hours: list[float] = []
-        self.plot.setLabel("left", "load / week")
-        self._bars = pg.BarGraphItem(x=[], height=[], width=DAY_S * 5, brush=theme.ACCENT, pen=None)
+
+PERIODS: dict[str, Period] = {
+    "day": Period("Day", 1, 7, "Today", "days"),
+    "week": Period("Week", 7, 4, "This week", "weeks"),
+    "month": Period("Month", 365.25 / 12, 3, "This month", "months"),
+}
+MEASURES: dict[str, str] = {"load": "Load", "hours": "Hours", "distance": "Distance"}
+MOVING_SIGMA_DAYS = 7  # Gaussian over the moving average of the load chart
+
+
+def period_start(day: date, period: str) -> date:
+    if period == "day":
+        return day
+    if period == "week":
+        return day - timedelta(days=day.weekday())
+    return day.replace(day=1)
+
+
+def period_end(start: date, period: str) -> date:
+    """First day of the next period."""
+    if period == "day":
+        return start + timedelta(days=1)
+    if period == "week":
+        return start + timedelta(weeks=1)
+    return date(start.year + start.month // 12, start.month % 12 + 1, 1)
+
+
+def by_period(days: list[date], values: list[float], period: str) -> tuple[list[date], list[float]]:
+    """Sums of consecutive days per period; returns the first day of each period."""
+    starts: list[date] = []
+    sums: list[float] = []
+    for day, value in zip(days, values, strict=True):
+        start = period_start(day, period)
+        if not starts or starts[-1] != start:
+            starts.append(start)
+            sums.append(0.0)
+        sums[-1] += value
+    return starts, sums
+
+
+class LoadPlot(RangePlot):
+    """Training load, hours or distance per day, week (Monday to Sunday) or month as bars."""
+
+    def __init__(
+        self, parent: QWidget | None = None, *, colors: ChartColors = theme.SCREEN_CHART
+    ) -> None:
+        super().__init__(DEFAULT_RANGE_DAYS, parent, colors=colors)
+        self.period = "week"
+        self.measure = "load"
+        self._days: list[date] = []
+        self._series: dict[str, list[float]] = {key: [] for key in MEASURES}
+        self._distance_unit = "km"
+        self._bars = pg.BarGraphItem(x0=[], x1=[], height=[], brush=colors.first, pen=None)
         self.plot.addItem(self._bars)
-        self._average = pg.InfiniteLine(
-            angle=0,
-            pen=pg.mkPen(theme.POWER, width=1, style=pg.QtCore.Qt.PenStyle.DashLine),
-            label="4-week average",
-            labelOpts={"position": 0.1, "color": theme.POWER},
-        )
+        self._moving = self.plot.plot(**_line(colors, colors.third, dots=False))
+        self._average = _level(colors, colors.second, "average", 0.1)
         self._average.hide()
         self.plot.addItem(self._average, ignoreBounds=True)
+        self.period_buttons = _choice_buttons(
+            self, {k: p.button for k, p in PERIODS.items()}, self.period, self.set_period
+        )
+        self.measure_buttons = _choice_buttons(self, MEASURES, self.measure, self.set_measure)
+        self.legend = text_label("muted")
+        bar = QHBoxLayout()
+        for button in self.period_buttons.values():
+            bar.addWidget(button)
+        bar.addSpacing(12)
+        bar.addWidget(self.legend, 1)
+        for button in self.measure_buttons.values():
+            bar.addWidget(button)
+        bar.addSpacing(12)
+        self.fft_button = QPushButton("FFT")  # the page opens the window
+        self.fft_button.setToolTip("Rhythms in the shown measure, over every day")
+        bar.addWidget(self.fft_button)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(bar)
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.summary)
 
-    def set_weeks(self, weeks: list[date], loads: list[float], hours: list[float]) -> None:
-        """weeks: Mondays, oldest first, the whole history; the last one is the current,
-        unfinished week."""
-        self._weeks, self._loads, self._hours = weeks, loads, hours
+    def daily(self) -> tuple[str, str, list[float]]:
+        """Name, unit and the total per day of the shown measure, the whole history."""
+        return MEASURES[self.measure], self._unit(), self._series[self.measure]
+
+    def clone(self, colors: ChartColors) -> LoadPlot:
+        copy = LoadPlot(colors=colors)
+        copy.range_days, copy.period, copy.measure = self.range_days, self.period, self.measure
+        series = self._series
+        copy.set_days(
+            self._days, series["load"], series["hours"], series["distance"], self._distance_unit
+        )
+        return copy
+
+    def title(self) -> str:
+        return f"{MEASURES[self.measure]} per {self.period}"
+
+    def subtitle(self) -> str:
+        what = {
+            "load": "Training load",
+            "hours": "Riding time in hours",
+            "distance": f"Distance in {self._distance_unit}",
+        }[self.measure]
+        weeks = ", Monday to Sunday" if self.period == "week" else ""
+        return f"{what} per {self.period}{weeks}, {span_text(self.range_days)}"
+
+    def legend_entries(self) -> list[LegendEntry]:
+        entries = [LegendEntry(self.colors.first, self.title(), "bar")]
+        if self.moving_average():
+            entries.append(LegendEntry(self.colors.third, self._moving_name(), "line"))
+        if self._average.isVisible():
+            entries.append(LegendEntry(self.colors.second, self._average_name(), "dash"))
+        return entries
+
+    def _moving_name(self) -> str:
+        """'4-week moving average'"""
+        return f"{PERIODS[self.period].average_of}-{self.period} moving average"
+
+    def _average_name(self) -> str:
+        """'Last 4-week average load', of full periods: the current one is still running."""
+        period = PERIODS[self.period]
+        measure = MEASURES[self.measure].lower()
+        return f"Last {period.average_of}-{self.period} average {measure}"
+
+    def set_days(
+        self,
+        days: list[date],
+        loads: list[float],
+        hours: list[float],
+        distances: list[float],
+        distance_unit: str = "km",
+    ) -> None:
+        """Totals per day, oldest first, the whole history up to today, rest days as 0.
+        distances are in distance_unit."""
+        self._days = days
+        self._series = {"load": loads, "hours": hours, "distance": distances}
+        self._distance_unit = distance_unit
         self._redraw()
 
+    def set_period(self, period: str) -> None:
+        self.period = period
+        for key, button in self.period_buttons.items():
+            button.setChecked(key == period)
+        self._redraw()
+
+    def set_measure(self, measure: str) -> None:
+        self.measure = measure
+        for key, button in self.measure_buttons.items():
+            button.setChecked(key == measure)
+        self._redraw()
+
+    def bars(self, measure: str | None = None) -> tuple[list[date], list[float]]:
+        """First day of each period and its total, oldest first; the last is the current one."""
+        return by_period(self._days, self._series[measure or self.measure], self.period)
+
+    def moving_average(self) -> list[float]:
+        """The green line: moving average of the shown bars from the first full window on,
+        smoothed with a Gaussian of one week. Only full periods count, as for the dashed
+        line; the current one is still running."""
+        period = PERIODS[self.period]
+        moving = moving_average(self.bars()[1][:-1], period.average_of)
+        return gaussian_smooth(moving, MOVING_SIGMA_DAYS / period.days) if moving else []
+
+    def _unit(self) -> str:
+        return {"load": "load", "hours": "h", "distance": self._distance_unit}[self.measure]
+
+    def _digits(self) -> int:
+        return 1 if self.measure == "hours" else 0
+
     def _redraw(self) -> None:
-        weeks, loads, hours = self._weeks, self._loads, self._hours
-        xs = [datetime.combine(w, time(12)).timestamp() + DAY_S * 2 for w in weeks]
-        self._bars.setOpts(x=xs, height=loads, width=DAY_S * 5)
-        if not weeks:
+        period = PERIODS[self.period]
+        starts, values = self.bars()
+        ends = [period_end(s, self.period) for s in starts]
+        x0 = [datetime.combine(s, time()).timestamp() for s in starts]
+        x1 = [datetime.combine(e, time()).timestamp() for e in ends]
+        gap = period.days * DAY_S / 7
+        self._bars.setOpts(x0=[x + gap for x in x0], x1=[x - gap for x in x1], height=values)
+        self.plot.setLabel("left", f"{self._unit()} / {self.period}")
+        moving = self.moving_average()
+        middles = [(a + b) / 2 for a, b in zip(x0, x1, strict=True)]
+        self._moving.setData(middles[period.average_of - 1 :][: len(moving)], moving)
+        if not starts:
             self._average.hide()
-            self.summary.setText("No rides yet.")
+            self.legend.clear()
+            self._set_summary("No rides yet.", hint=False)
             return
-        count = len(weeks) if self.range_days is None else math.ceil(self.range_days / 7)
-        first = max(0, len(weeks) - count)
-        self.plot.setXRange(xs[first] - DAY_S * 4, xs[-1] + DAY_S * 4, padding=0)
-        self.plot.setYRange(0, max([*loads[first:], 1]) * 1.15, padding=0)
-        previous = loads[-5:-1]
-        average = sum(previous) / len(previous) if previous else 0.0
+        count = len(starts) if self.range_days is None else math.ceil(self.range_days / period.days)
+        first = max(0, len(starts) - count)
+        pad = gap / 2
+        self.plot.setXRange(x0[first] - pad, x1[-1] + pad, padding=0)
+        self.plot.setYRange(0, max([*values[first:], 1]) * 1.15, padding=0)
+        previous = values[-period.average_of - 1 : -1]
+        average = average_of(previous)
         self._average.setValue(average)
+        self._average.label.setFormat(
+            f"{self._average_name().lower()}: {average:.{self._digits()}f}"
+        )
         self._average.setVisible(bool(previous))
-        text = f"This week: load {loads[-1]:.0f}, {hours[-1]:.1f} h"
+        parts = []
+        if moving:
+            parts.append(f"Green: {self._moving_name()}")
+        if previous:
+            parts.append(f"Dashed: {self._average_name().lower()}")
+        self.legend.setText("    ".join(parts))
+        totals = {key: self.bars(key)[1][-1] for key in MEASURES}
+        text = (
+            f"{period.current}: load {totals['load']:.0f}, {totals['hours']:.1f} h, "
+            f"{totals['distance']:.0f} {self._distance_unit}"
+        )
         if previous and average > 0:
-            text += f"  ·  {100 * loads[-1] / average:.0f}% of the average of the 4 weeks before"
-            if len(loads) >= 2 and loads[-2] > 1.3 * average:
-                text += (
-                    "\nLast week was a big jump over your usual load: ease in if you feel tired."
-                )
-        self.summary.setText(f"{text}\n{RANGE_HINT}")
+            text += (
+                f"  ·  {MEASURES[self.measure].lower()} {100 * values[-1] / average:.0f}% of the "
+                f"average of the {period.average_of} {period.previous} before"
+            )
+        loads = self.bars("load")[1]
+        usual = loads[-period.average_of - 1 : -1]
+        if self.period == "week" and usual and loads[-2] > 1.3 * average_of(usual):
+            text += "\nLast week was a big jump over your usual load: ease in if you feel tired."
+        self._set_summary(text)
+
+
+def average_of(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def moving_average(values: list[float], window: int) -> list[float]:
+    """Average of each value and the window - 1 before it, from the first full window on."""
+    return [average_of(values[i - window + 1 : i + 1]) for i in range(window - 1, len(values))]
+
+
+def _choice_buttons(
+    parent: QWidget, options: dict[str, str], current: str, pick: Callable[[str], None]
+) -> dict[str, QPushButton]:
+    """Exclusive, checkable buttons; pick gets the key of the clicked one."""
+    group = QButtonGroup(parent)
+    group.setExclusive(True)
+    buttons = {}
+    for key, text in options.items():
+        button = QPushButton(text)
+        button.setCheckable(True)
+        button.setChecked(key == current)
+        button.clicked.connect(lambda _c=False, k=key: pick(k))
+        group.addButton(button)
+        buttons[key] = button
+    return buttons
 
 
 class TrendPlot(RangePlot):
     """One tracked value (FTP, weight, heart rates) over time, as logged."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(None, parent)
+    def __init__(
+        self, parent: QWidget | None = None, *, colors: ChartColors = theme.SCREEN_CHART
+    ) -> None:
+        super().__init__(None, parent, colors=colors)
         self._name = self._unit = ""
         self._days: list[date] = []
         self._values: list[float] = []
-        self._line = self.plot.plot(
-            pen=pg.mkPen(theme.ACCENT, width=2),
-            symbol="o",
-            symbolSize=7,
-            symbolBrush=theme.ACCENT,
-            symbolPen=None,
-        )
+        self._line = self.plot.plot(**_line(colors, colors.first, dots=True))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot, 1)
         layout.addWidget(self.summary)
+
+    def clone(self, colors: ChartColors) -> TrendPlot:
+        copy = TrendPlot(colors=colors)
+        copy.range_days = self.range_days
+        copy.set_series(self._name, self._unit, self._days, self._values)
+        return copy
+
+    def title(self) -> str:
+        return self._name or "Trend"
+
+    def subtitle(self) -> str:
+        return f"As logged, in {self._unit}, {span_text(self.range_days)}"
+
+    def legend_entries(self) -> list[LegendEntry]:
+        return [LegendEntry(self.colors.first, self._name, "dots")] if self._name else []
 
     def set_series(self, name: str, unit: str, days: list[date], values: list[float]) -> None:
         """Oldest first, the whole history."""
@@ -423,7 +763,7 @@ class TrendPlot(RangePlot):
         xs = [datetime.combine(d, time(12)).timestamp() for d in days]
         self._line.setData(xs, values)
         if not days:
-            self.summary.setText(f"No {name.lower()} logged yet.")
+            self._set_summary(f"No {name.lower()} logged yet.", hint=False)
             return
         now = datetime.now().timestamp()
         start = xs[0]
@@ -444,4 +784,4 @@ class TrendPlot(RangePlot):
             text += f"{values[-1] - values[first]:+.1f} {unit} since {days[first]:%Y-%m-%d}"
         else:
             text += "nothing logged in this time span"
-        self.summary.setText(f"{text}\n{RANGE_HINT}")
+        self._set_summary(text)

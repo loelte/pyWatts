@@ -172,20 +172,65 @@ def test_power_curve_and_form(progress, repo):
     assert "Today: fitness" in progress.form.summary.text()
 
 
-def test_weekly_trend_and_export(progress, repo, tmp_path):
+def test_load_trend_and_export(progress, repo, tmp_path):
     sid = repo.start_session(Workout("W", [Steady(600, 1)]), 200)
-    repo.add_samples(sid, [Sample(float(t), 200, None, None, 0, None) for t in range(600)])
+    repo.add_samples(sid, [Sample(float(t), 200, None, None, 0, 36.0) for t in range(600)])
     repo.finish_session(sid, "completed")
+    assert repo.get_session(sid).distance_m == pytest.approx(6000)
     repo.record_metric(FTP_W, 250, date(2026, 1, 1))
     repo.record_metric(FTP_W, 260, date(2026, 6, 1))
     progress.refresh()
-    assert "This week: load" in progress.weekly.summary.text()
+    assert progress.charts.tabText(2) == "Load"
+    assert "This week: load" in progress.load.summary.text()
+    assert "0.2 h, 6 km" in progress.load.summary.text()
+    progress.load.measure_buttons["distance"].click()
+    progress.load.period_buttons["day"].click()
+    assert progress.load.bars()[1] == [pytest.approx(6.0)]
+    assert progress.load.summary.text().startswith("Today:")
+    repo.set_setting(UNITS, "imperial")
+    progress.refresh()
+    assert progress.load.bars()[1] == [pytest.approx(6 / 1.609344)]
+    assert "4 mi" in progress.load.summary.text()
     assert "260 W on 2026-06-01" in progress.trend.summary.text()
     out = tmp_path / "plot.png"
     progress.ask_export_path = lambda _s: out
     progress.charts.setCurrentIndex(2)
     progress.export_button.click()
     assert out.stat().st_size > 0 and progress.message.text() == "Saved plot.png"
+
+
+def test_export_is_light_and_keeps_the_options(progress, repo, tmp_path):
+    from PyQt6.QtGui import QColor, QImage
+
+    from pywatts.ui import theme
+    from pywatts.ui.widgets.chart_export import HEIGHT, WIDTH, render_chart
+
+    sid = repo.start_session(Workout("W", [Steady(600, 1)]), 200)
+    repo.add_samples(sid, [Sample(float(t), 200, None, None, 0, 36.0) for t in range(600)])
+    repo.finish_session(sid, "completed")
+    progress.refresh()
+    progress.load.measure_buttons["distance"].click()
+    progress.load.period_buttons["month"].click()
+    progress.load.set_range(90)
+    copy = progress.load.clone(theme.PRINT_CHART)
+    assert (copy.period, copy.measure, copy.range_days) == ("month", "distance", 90)
+    assert copy.bars() == progress.load.bars()
+    assert copy.title() == "Distance per month" and "last 3 months" in copy.subtitle()
+    assert "Right click" not in copy.export_summary  # no hints about the screen
+    image = render_chart(progress.load, "Alex")
+    assert (image.width(), image.height()) == (WIDTH, HEIGHT)
+    assert image.pixelColor(5, 5) == QColor(theme.PRINT_CHART.background)
+    # the chart on screen keeps the dark theme
+    assert progress.load.plot.backgroundBrush().color() == QColor(theme.SURFACE)
+
+    out = tmp_path / "curve.png"
+    progress.ask_export_path = lambda suggestion: (
+        out if suggestion.startswith("pywatts-power") else None
+    )
+    progress.charts.setCurrentIndex(0)
+    progress.export_button.click()
+    saved = QImage(str(out))
+    assert saved.width() == WIDTH and saved.pixelColor(WIDTH // 2, 5) == QColor("#ffffff")
 
 
 def test_fitness_form():
@@ -300,30 +345,112 @@ def test_gaussian_smooth():
     assert corner(gaussian_smooth(step, 2)) < 0.5 * corner(smooth(step, 3))
 
 
-def test_weekly_range(qtbot):
+def test_load_range(qtbot):
     from datetime import timedelta
 
-    from pywatts.ui.widgets.power_curve import WeeklyPlot
+    from pywatts.ui.widgets.power_curve import LoadPlot
 
-    plot = WeeklyPlot()
+    plot = LoadPlot()
     qtbot.addWidget(plot)
     plot.set_range(30)  # no data yet
-    weeks = [date(2025, 1, 6) + timedelta(weeks=i) for i in range(60)]
-    plot.set_weeks(weeks, [500.0] + [100.0] * 59, [1.0] * 60)
+    days = [date(2025, 1, 6) + timedelta(days=i) for i in range(60 * 7)]
+    loads = [(500.0 if i == 0 else 100.0) if d.weekday() == 0 else 0.0 for i, d in enumerate(days)]
+    hours = [1.0 if d.weekday() == 0 else 0.0 for d in days]
+    plot.set_days(days, loads, hours, [0.0] * len(days))
 
     def view():
         (x0, x1), (_y0, y1) = plot.plot.getPlotItem().vb.viewRange()
         return round((x1 - x0) / 86400 / 7 - 1 / 7), y1
 
-    for days, shown in ((30, 5), (90, 13), (180, 26), (365, 53)):
-        plot.set_range(days)
+    for span, shown in ((30, 5), (90, 13), (180, 26), (365, 53)):
+        plot.set_range(span)
         assert view() == (shown, pytest.approx(115))  # the high week is out of sight
     plot.set_range(None)
     assert view() == (60, pytest.approx(575))
     assert "Right click" in plot.summary.text()
 
+    plot.set_measure("hours")
+    assert plot.bars()[1] == [1.0] * 60 and plot.plot.getAxis("left").labelText == "h / week"
+    plot.set_period("month")
+    starts, totals = plot.bars()
+    assert starts[0] == date(2025, 1, 1) and starts[-1] == days[-1].replace(day=1)
+    assert sum(totals) == 60 and totals[0] == 4  # Mondays in January from the 6th
+    assert "hours 0% of the average of the 3 months before" in plot.summary.text()
+    plot.set_period("day")
+    assert len(plot.bars()[0]) == len(days)
+    assert plot.summary.text().startswith("Today: load 0, 0.0 h, 0 km")
 
-def test_weekly_reaches_back_to_the_first_ride(progress, repo):
+
+def test_by_period():
+    from pywatts.ui.widgets.power_curve import by_period, period_end
+
+    days = [date(2025, 12, 30), date(2025, 12, 31), date(2026, 1, 1)]
+    assert by_period(days, [1.0, 2.0, 3.0], "month") == (
+        [date(2025, 12, 1), date(2026, 1, 1)],
+        [3.0, 3.0],
+    )
+    assert by_period(days, [1.0, 2.0, 3.0], "week") == ([date(2025, 12, 29)], [6.0])
+    assert period_end(date(2025, 12, 1), "month") == date(2026, 1, 1)
+    assert period_end(date(2026, 1, 1), "month") == date(2026, 2, 1)
+
+
+def test_smoothed_moving_average_and_last_average(qtbot):
+    from datetime import timedelta
+
+    from pywatts.core.metrics import gaussian_smooth
+    from pywatts.ui.widgets.power_curve import LoadPlot, moving_average
+
+    assert moving_average([1.0, 2.0, 3.0, 4.0, 5.0], 4) == [2.5, 3.5]
+    assert moving_average([1.0, 2.0], 4) == []
+    plot = LoadPlot()
+    qtbot.addWidget(plot)
+    plot.set_range(None)
+    days = [date(2025, 1, 6) + timedelta(days=i) for i in range(10 * 7 + 1)]
+    weekly = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 5.0]
+    loads = [weekly[i // 7] if d.weekday() == 0 else 0.0 for i, d in enumerate(days)]
+    plot.set_days(days, loads, [0.0] * len(days), [0.0] * len(days))
+    # 10 full weeks and the running one, which never counts; sigma of one week = one bar
+    raw = [25.0, 35.0, 45.0, 55.0, 65.0, 75.0, 85.0]
+    assert plot.moving_average() == gaussian_smooth(raw, 1.0)
+    xs, ys = plot._moving.getData()
+    assert len(xs) == 7 and list(ys) == plot.moving_average()
+    assert ys[3] == pytest.approx(55.0)  # a straight rise stays straight inside
+    assert plot._average.value() == 85.0  # the last 4 full weeks
+    assert plot._average.label.format == "last 4-week average load: 85"
+    assert plot.legend.text() == (
+        "Green: 4-week moving average    Dashed: last 4-week average load"
+    )
+    texts = [e.text for e in plot.legend_entries()]
+    assert texts == ["Load per week", "4-week moving average", "Last 4-week average load"]
+    plot.set_period("day")  # sigma of 7 bars
+    full_days = plot.bars()[1][:-1]
+    assert plot.moving_average() == gaussian_smooth(moving_average(full_days, 7), 7.0)
+    plot.set_measure("hours")
+    plot.set_period("month")  # January and February are full: too few for 3 months
+    assert plot.moving_average() == []
+    assert plot.legend.text() == "Dashed: last 3-month average hours"
+
+
+def test_distance_of_older_rides_is_filled_by_the_migration(tmp_path, monkeypatch):
+    from pywatts.storage import db
+
+    path = tmp_path / "old.db"
+    with monkeypatch.context() as m:
+        m.setattr(db, "MIGRATIONS", db.MIGRATIONS[:-1])
+        old = open_db(path)
+        sid = Repo(old).start_session(Workout("W", [Steady(60, 1)]), 200)
+        Repo(old).add_samples(sid, [Sample(float(t), 200, None, None, 0, 18.0) for t in range(60)])
+        old.execute("UPDATE sessions SET ended_at_utc = started_at_utc WHERE id = ?", (sid,))
+        old.commit()
+        old.close()
+    conn = open_db(path)
+    try:
+        assert Repo(conn).get_session(sid).distance_m == pytest.approx(300)
+    finally:
+        conn.close()
+
+
+def test_load_reaches_back_to_the_first_ride(progress, repo):
     from datetime import UTC, datetime, timedelta
 
     from pywatts.storage.repo import ImportedRide
@@ -336,7 +463,8 @@ def test_weekly_reaches_back_to_the_first_ride(progress, repo):
     repo.import_session(ride, "file", "x", "sha")
     progress.refresh()
     assert progress.message.text() == ""
-    assert len(progress.weekly._weeks) == 61 and progress.weekly._loads[0] > 0
+    weeks, loads = progress.load.bars()
+    assert len(weeks) == 61 and loads[0] > 0
 
 
 def test_trend_range(qtbot):
@@ -389,7 +517,7 @@ def test_right_click_opens_the_range_menu(progress, monkeypatch):
         next(a for a in menu.actions() if a.text() == "1 year").trigger()
 
     monkeypatch.setattr(QMenu, "exec", choose)
-    for plot in (progress.form, progress.weekly, progress.trend):
+    for plot in (progress.form, progress.load, progress.trend):
         rect = plot.plot.getPlotItem().vb.sceneBoundingRect()
         plot.plot.scene().sigMouseClicked.emit(Click(rect.center()))
         assert plot.range_days == 365

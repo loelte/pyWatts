@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QDate, QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QShowEvent
@@ -43,15 +44,20 @@ from pywatts.storage.repo import (
 )
 from pywatts.ui import theme
 from pywatts.ui.profile import FTP_MAX, FTP_MIN, LB_PER_KG
-from pywatts.ui.ride import NO_VALUE
+from pywatts.ui.ride import KM_PER_MILE, NO_VALUE
+from pywatts.ui.widgets.chart_export import render_chart
 from pywatts.ui.widgets.common import GAP, card, pad_spin_boxes, page_layout, text_label
 from pywatts.ui.widgets.power_curve import (
+    Chart,
     FormPlot,
+    LoadPlot,
     PowerCurvePlot,
     TrendPlot,
-    WeeklyPlot,
     duration_label,
 )
+
+if TYPE_CHECKING:
+    from pywatts.ui.widgets.spectrum import SpectrumWindow
 
 RECENT_DAYS = 90
 # name, unit, lowest, highest, decimals
@@ -79,38 +85,23 @@ def _table(columns: list[str]) -> QTableWidget:
     return table
 
 
-def _daily_loads(rides: list[SessionRow], today: date) -> tuple[list[date], list[float]]:
-    """Training load per local day from the first ride to today, rest days as 0."""
-    per_day: dict[date, float] = {}
+def _daily(
+    rides: list[SessionRow], today: date
+) -> tuple[list[date], list[float], list[float], list[float]]:
+    """Load, hours and km per local day from the first ride to today, rest days as 0."""
+    per_day: dict[date, list[float]] = {}
     for s in rides:
-        day = s.started_at_utc.astimezone().date()
-        per_day[day] = per_day.get(day, 0.0) + (s.load or 0.0)
+        totals = per_day.setdefault(s.started_at_utc.astimezone().date(), [0.0, 0.0, 0.0])
+        totals[0] += s.load or 0.0
+        totals[1] += (s.duration_s or 0.0) / 3600
+        totals[2] += (s.distance_m or 0.0) / 1000
     if not per_day:
-        return [], []
+        return [], [], [], []
     first = min(per_day)
     days = [first + timedelta(days=i) for i in range((max(today, first) - first).days + 1)]
-    return days, [per_day.get(d, 0.0) for d in days]
-
-
-def _weekly(rides: list[SessionRow], today: date) -> tuple[list[date], list[float], list[float]]:
-    """Load and hours per week (Mondays) from the first ride to the current week."""
-    this_week = today - timedelta(days=today.weekday())
-    oldest = min((s.started_at_utc.astimezone().date() for s in rides), default=today)
-    count = (this_week - (oldest - timedelta(days=oldest.weekday()))).days // 7 + 1
-    weeks = [this_week - timedelta(weeks=i) for i in range(count - 1, -1, -1)]
-    load = dict.fromkeys(weeks, 0.0)
-    hours = dict.fromkeys(weeks, 0.0)
-    for s in rides:
-        day = s.started_at_utc.astimezone().date()
-        monday = day - timedelta(days=day.weekday())
-        if monday in load:
-            load[monday] += s.load or 0.0
-            hours[monday] += (s.duration_s or 0.0) / 3600
-    first = next((i for i, w in enumerate(weeks) if load[w] or hours[w]), None)
-    if first is None:
-        return [], [], []
-    weeks = weeks[first:]
-    return weeks, [load[w] for w in weeks], [hours[w] for w in weeks]
+    columns = zip(*(per_day.get(d, [0.0, 0.0, 0.0]) for d in days), strict=True)
+    loads, hours, km = (list(c) for c in columns)
+    return days, loads, hours, km
 
 
 class ProgressPage(QWidget):
@@ -181,7 +172,7 @@ class ProgressPage(QWidget):
 
         self.curve = PowerCurvePlot(RECENT_DAYS)
         self.form = FormPlot()
-        self.weekly = WeeklyPlot()
+        self.load = LoadPlot()
         self.trend = TrendPlot()
         self.trend_metric = QComboBox()
         for key, (text, *_rest) in METRICS.items():
@@ -197,7 +188,7 @@ class ProgressPage(QWidget):
         self.charts.setCornerWidget(self.export_button)
         self.charts.addTab(self.curve, "Power curve")
         self.charts.addTab(self.form, "Fitness and form")
-        self.charts.addTab(self.weekly, "Weekly load")
+        self.charts.addTab(self.load, "Load")
         self.charts.addTab(trend, "Trends")
         self.charts.setMinimumHeight(340)
         layout.addWidget(self.charts, 1)
@@ -212,6 +203,8 @@ class ProgressPage(QWidget):
         self.log.itemSelectionChanged.connect(self._update_buttons)
         self.trend_metric.currentIndexChanged.connect(lambda _i: self._guard(self._load_trend))
         self.export_button.clicked.connect(lambda: self._guard(self.export_plot))
+        self.load.fft_button.clicked.connect(lambda: self._guard(self.show_spectrum))
+        self.spectrum: SpectrumWindow | None = None  # made on the first click
 
     def refresh(self) -> None:
         """Waits until the page is shown: guessing loads reads all samples of some rides."""
@@ -279,10 +272,12 @@ class ProgressPage(QWidget):
         self.curve.set_curves(best, recent, profile.ftp_w, profile.weight_kg)
         rides = [self._with_load(s) for s in self._repo.list_sessions() if s.ended_at_utc]
         self.volume.setText("\n".join(self._volume(rides, now, days) for days in (7, 42)))
-        days, loads = _daily_loads(rides, now.astimezone().date())
+        days, loads, hours, km = _daily(rides, now.astimezone().date())
         self.form.set_series(days, fitness_form(loads))
-        weeks, week_load, week_hours = _weekly(rides, now.astimezone().date())
-        self.weekly.set_weeks(weeks, week_load, week_hours)
+        if self._imperial:
+            self.load.set_days(days, loads, hours, [d / KM_PER_MILE for d in km], "mi")
+        else:
+            self.load.set_days(days, loads, hours, km, "km")
         self._entries = self._repo.list_metrics()
         self._load_trend()
         self.log.setRowCount(len(self._entries))
@@ -323,15 +318,34 @@ class ProgressPage(QWidget):
         return Path(path) if path else None
 
     def export_plot(self) -> None:
-        """Save the shown chart, with its labels and summary, as an image."""
-        widget = self.charts.currentWidget()
-        name = self.charts.tabText(self.charts.currentIndex()).lower().replace(" ", "-")
-        path = self.ask_export_path(f"pywatts-{name}.png")
-        if path is None or widget is None:
+        """Save the shown chart as a light image with title, legend and summary: the same
+        data, options and time span, but never the dark look of the screen."""
+        chart = self._shown_chart()
+        name = chart.title().lower().replace(" ", "-")
+        path = self.ask_export_path(f"pywatts-{name}-{date.today():%Y-%m-%d}.png")
+        if path is None:
             return
-        if not widget.grab().save(str(path), "PNG"):
+        image = render_chart(chart, load_profile(self._repo).name)
+        if not image.save(str(path), "PNG"):
             raise OSError(f"could not write {path}")
         self.message.setText(f"Saved {path.name}")
+
+    def show_spectrum(self) -> None:
+        """A window with the FFT of the measure shown on the load chart; one window, which
+        every click fills again and brings to the front. A child of the page, so it closes
+        with it."""
+        if self.spectrum is None:
+            from pywatts.ui.widgets.spectrum import SpectrumWindow
+
+            self.spectrum = SpectrumWindow(self)
+        self.spectrum.set_series(*self.load.daily())
+        self.spectrum.show()
+        self.spectrum.raise_()
+        self.spectrum.activateWindow()
+
+    def _shown_chart(self) -> Chart:
+        charts: list[Chart] = [self.curve, self.form, self.load, self.trend]
+        return charts[self.charts.currentIndex()]
 
     @staticmethod
     def _peak_cells(peak: Peak | None) -> list[str]:

@@ -151,6 +151,13 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "CREATE INDEX changes_batch ON changes(batch)",
     ),
     ("DROP TABLE main.workouts",),  # see _move_workouts
+    (
+        "ALTER TABLE sessions ADD COLUMN distance_m REAL",
+        # Speed is km/h, one sample per second; NULL for rides without speed.
+        "UPDATE sessions SET distance_m = "
+        "(SELECT SUM(speed) / 3.6 FROM samples WHERE session_id = sessions.id) "
+        "WHERE ended_at_utc IS NOT NULL",
+    ),
 ]
 _MOVE_STEP = 5  # the entry above
 

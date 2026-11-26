@@ -7,7 +7,7 @@ pyWatts is a desktop app for structured indoor cycling. It covers the whole way 
 - **Connect sensors**: heart rate strap and power meter (power meters are not yet tried on real hardware). On request the trainer is matched to the power meter.
 - **Keep every ride**: charts of power, heart rate, cadence and speed, best power per ride, `.fit` export. Rides are saved while you ride, so a crash costs at most about the last 10 seconds.
 - **Bring older rides**: import `.fit` files, folders and `.zip` archives, such as a Strava export. New rides **from Wahoo and Garmin** (Garmin is experimental) come by themselves. **Upload to Strava**, by hand or automatically.
-- **Follow your progress**: power curve, best power from 3 s to 60 min, fitness and form, weekly load, and trends of FTP, weight and heart rate. Charts can be saved as images.
+- **Follow your progress**: power curve, best power from 3 s to 60 min, fitness and form, load, hours and distance per day, week or month, and trends of FTP, weight and heart rate. Charts can be saved as images.
 - **Plan your training** in a year, month or week calendar with indoor and outdoor units, which are matched with the rides you did.
 - **Ask an AI coach** (optional, with Claude Code) that reads your rides, builds plans and workouts, and whose changes can be undone. It cannot control the trainer.
 - **Share one computer**: each rider has their own data and logins, the workout library is shared.

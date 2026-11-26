@@ -59,7 +59,7 @@ FLUSH_INTERVAL_S = 10
 _STATUSES = ("completed", "aborted", "crashed")
 _SESSION_COLUMNS = (
     "id, workout_id, workout_snapshot_json, started_at_utc, ended_at_utc, ftp_w, status, "
-    "avg_power, max_power, avg_hr, duration_s, kj, np, load, weight_kg, source"
+    "avg_power, max_power, avg_hr, duration_s, kj, np, load, weight_kg, source, distance_m"
 )
 _OVERLAP = 0.5  # of the shorter ride; more than this is the same ride
 
@@ -94,6 +94,7 @@ class SessionRow:
     load: float | None = None  # core.metrics.training_load
     weight_kg: float | None = None  # at the time of the ride
     source: str = "pywatts"  # pywatts | wahoo | garmin | zwift | file
+    distance_m: float | None = None  # summed from speed; None without speed
 
 
 @dataclass(frozen=True)
@@ -373,9 +374,10 @@ class Repo:
     ) -> None:
         powers = [s.power for s in samples if s.power is not None]
         hrs = [s.hr for s in samples if s.hr is not None]
+        speeds = [s.speed for s in samples if s.speed is not None]
         self._conn.execute(
             "UPDATE sessions SET status = ?, ended_at_utc = ?, avg_power = ?, max_power = ?, "
-            "avg_hr = ?, duration_s = ?, kj = ? WHERE id = ?",
+            "avg_hr = ?, duration_s = ?, kj = ?, distance_m = ? WHERE id = ?",
             (
                 status,
                 _utc_text(ended),
@@ -384,6 +386,7 @@ class Repo:
                 average(hrs) if hrs else None,
                 samples[-1].t + 1.0 if samples else 0.0,  # each sample covers 1 s
                 kilojoules(powers) if powers else None,
+                sum(speeds) / 3.6 if speeds else None,  # km/h, 1 s per sample
                 session_id,
             ),
         )
